@@ -1,0 +1,278 @@
+"""
+CAMEL Dataset loader for infrared object detection.
+
+Loads 336x256 grayscale infrared images and their corresponding YOLO format labels.
+Supports train/val/test splits.
+"""
+
+import os
+import cv2
+import numpy as np
+import torch
+from torch.utils.data import Dataset
+from pathlib import Path
+from typing import Tuple, List, Dict, Optional
+from .transforms import ImageTransforms, InferenceTransforms
+
+
+class CAMELDataset(Dataset):
+    """
+    PyTorch Dataset for CAMEL infrared imagery.
+    
+    Dataset structure:
+    - data/camel/images/train/Seq##_*.png  (infrared images, 336x256)
+    - data/camel/labels/train/Seq##.txt    (YOLO format labels per sequence)
+    
+    YOLO label format per line: <class_id> <x_center> <y_center> <width> <height>
+    All coordinates are normalized to [0, 1] relative to image dimensions.
+    
+    Args:
+        root_dir (str): Path to data/camel directory
+        split (str): 'train', 'val', or 'test'. Default: 'train'
+        augment (bool): Apply augmentations (only for training). Default: True
+        normalize (bool): Normalize pixel values. Default: True
+    """
+    
+    def __init__(
+        self,
+        root_dir: str,
+        split: str = "train",
+        augment: bool = True,
+        normalize: bool = True,
+    ):
+        """Initialize CAMEL dataset."""
+        self.root_dir = Path(root_dir)
+        self.split = split
+        
+        self.images_dir = self.root_dir / "images" / split
+        self.labels_dir = self.root_dir / "labels" / split
+        
+        # Verify directories exist
+        if not self.images_dir.exists():
+            raise FileNotFoundError(f"Images directory not found: {self.images_dir}")
+        if not self.labels_dir.exists():
+            raise FileNotFoundError(f"Labels directory not found: {self.labels_dir}")
+        
+        # Image properties
+        self.image_height = 256
+        self.image_width = 336
+        
+        # Load image paths
+        self.image_files = sorted(self.images_dir.glob("*.png"))
+        if len(self.image_files) == 0:
+            raise ValueError(f"No PNG images found in {self.images_dir}")
+        
+        # Load label files (one per sequence)
+        self.label_files = sorted(self.labels_dir.glob("*.txt"))
+        self._build_image_to_label_mapping()
+        
+        # Set up transforms
+        # Note: Augmentation is delegated to Ultralytics YOLOv8 training pipeline
+        # ImageTransforms only handles normalization
+        if split == "train":
+            self.transforms = ImageTransforms(normalize=normalize)
+        else:
+            self.transforms = InferenceTransforms(normalize=normalize)
+    
+    def _build_image_to_label_mapping(self):
+        """
+        Build a mapping from image files to their corresponding label files.
+        
+        Labels are stored per-sequence (Seq##.txt), so we need to find which
+        sequence each image belongs to.
+        
+        Example:
+            Image: Seq01_001.png → Label: Seq01.txt
+            Image: Seq05_042.png → Label: Seq05.txt
+        """
+        self.image_to_labels = {}
+        
+        for img_file in self.image_files:
+            # Extract sequence number from filename (e.g., "Seq01" from "Seq01_001.png")
+            seq_name = img_file.stem.split("_")[0]  # Get "Seq01" part
+            label_file = self.labels_dir / f"{seq_name}.txt"
+            
+            if label_file.exists():
+                self.image_to_labels[str(img_file)] = str(label_file)
+            else:
+                print(f"Warning: Label file not found for {img_file}")
+    
+    def __len__(self) -> int:
+        """Return the total number of images in the dataset."""
+        return len(self.image_files)
+    
+    def __getitem__(self, idx: int) -> Tuple[torch.Tensor, Dict]:
+        """
+        Load image and corresponding labels.
+        
+        Args:
+            idx (int): Index of image to load
+        
+        Returns:
+            Tuple of:
+                - image (torch.Tensor): Shape (1, 256, 336), normalized to [0, 1]
+                - targets (Dict): Dictionary containing:
+                    - 'boxes': torch.Tensor of shape (N, 4), YOLO format
+                    - 'class_ids': torch.Tensor of shape (N,)
+                    - 'image_path': str, path to image file
+        """
+        img_path = self.image_files[idx]
+        
+        # Load image
+        image = self._load_image(img_path)
+        
+        # Apply transformations
+        image = self.transforms(image)
+        
+        # Load labels
+        targets = self._load_labels(img_path)
+        
+        return image, targets
+    
+    def _load_image(self, img_path: Path) -> np.ndarray:
+        """
+        Load infrared image from disk.
+        
+        Args:
+            img_path (Path): Path to image file
+        
+        Returns:
+            np.ndarray: Image array, shape (H, W), pixel values as original
+        """
+        image = cv2.imread(str(img_path), cv2.IMREAD_GRAYSCALE)
+        
+        if image is None:
+            raise ValueError(f"Failed to load image: {img_path}")
+        
+        return image
+    
+    def _load_labels(self, img_path: Path) -> Dict:
+        """
+        Load YOLO format labels for the image.
+        
+        Args:
+            img_path (Path): Path to image file
+        
+        Returns:
+            Dict containing:
+                - 'boxes': torch.Tensor of shape (N, 4), YOLO format
+                - 'class_ids': torch.Tensor of shape (N,)
+                - 'image_path': str
+        """
+        # Map labels by sequence name derived from the image filename
+        seq_name = img_path.stem.split("_")[0]
+        label_file = self.labels_dir / f"{seq_name}.txt"
+        
+        boxes = []
+        class_ids = []
+        
+        if label_file.exists():
+            with open(label_file, 'r') as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    
+                    parts = line.split()
+                    if len(parts) >= 5:
+                        # YOLO format: <class_id> <x_center> <y_center> <width> <height>
+                        class_id = int(parts[0])
+                        x_center = float(parts[1])
+                        y_center = float(parts[2])
+                        width = float(parts[3])
+                        height = float(parts[4])
+                        
+                        boxes.append([x_center, y_center, width, height])
+                        class_ids.append(class_id)
+        
+        # Convert to tensors
+        if boxes:
+            boxes = torch.tensor(boxes, dtype=torch.float32)
+            class_ids = torch.tensor(class_ids, dtype=torch.long)
+        else:
+            boxes = torch.zeros((0, 4), dtype=torch.float32)
+            class_ids = torch.zeros((0,), dtype=torch.long)
+        
+        targets = {
+            'boxes': boxes,
+            'class_ids': class_ids,
+            'image_path': str(img_path),
+        }
+        
+        return targets
+    
+    def get_image_info(self, idx: int) -> Dict:
+        """
+        Get metadata about an image without loading it.
+        
+        Args:
+            idx (int): Image index
+        
+        Returns:
+            Dict with image path, size, and label info
+        """
+        img_path = self.image_files[idx]
+        seq_name = img_path.stem.split("_")[0]
+        label_file = self.labels_dir / f"{seq_name}.txt"
+        
+        info = {
+            'index': idx,
+            'image_path': str(img_path),
+            'sequence': seq_name,
+            'image_size': (self.image_height, self.image_width),
+            'has_labels': label_file.exists(),
+        }
+        
+        return info
+
+
+def create_dataloaders(
+    data_dir: str,
+    batch_size: int = 32,
+    num_workers: int = 4,
+    augment: bool = True,
+) -> Tuple[torch.utils.data.DataLoader, torch.utils.data.DataLoader]:
+    """
+    Create train and validation dataloaders.
+    
+    Args:
+        data_dir (str): Path to data/camel directory
+        batch_size (int): Batch size. Default: 32
+        num_workers (int): Number of data loading workers. Default: 4
+        augment (bool): Enable augmentation for training. Default: True
+    
+    Returns:
+        Tuple of (train_loader, val_loader)
+    """
+    # Training dataset with augmentation
+    train_dataset = CAMELDataset(
+        root_dir=data_dir,
+        split='train',
+        augment=augment,
+    )
+    
+    # Validation dataset without augmentation
+    val_dataset = CAMELDataset(
+        root_dir=data_dir,
+        split='val',
+        augment=False,
+    )
+    
+    # Create dataloaders
+    train_loader = torch.utils.data.DataLoader(
+        train_dataset,
+        batch_size=batch_size,
+        num_workers=num_workers,
+        shuffle=True,
+        pin_memory=True,
+    )
+    
+    val_loader = torch.utils.data.DataLoader(
+        val_dataset,
+        batch_size=batch_size,
+        num_workers=num_workers,
+        shuffle=False,
+        pin_memory=True,
+    )
+    
+    return train_loader, val_loader

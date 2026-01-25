@@ -1,0 +1,29 @@
+# Core ML Framework
+torch==2.5.1
+torchvision==0.20.1
+
+# YOLO and Model Training
+ultralytics==8.4.7
+
+# Data Processing and Analysis
+numpy==2.2.0
+pandas==2.2.3
+opencv-python==4.10.0.84
+scikit-learn==1.5.2
+
+# Configuration and Utilities
+PyYAML==6.0.3
+tqdm==4.67.1
+
+# Visualization
+matplotlib==3.9.2
+
+# Model Export and Inference
+onnx==1.16.1
+onnxruntime==1.19.2
+
+# Jupyter Notebooks
+jupyter==1.0.0
+
+# Development
+pytest==8.3.0

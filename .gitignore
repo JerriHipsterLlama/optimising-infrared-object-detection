@@ -2,3 +2,5 @@
 data/**
 data/*.txt
 build/**
+/.venv/*
+**/__pycache__/**
