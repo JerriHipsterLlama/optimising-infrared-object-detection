@@ -1,0 +1,74 @@
+# YOLOv8n Training Configuration
+# Optimized for infrared object detection on CAMEL dataset
+# Image size: 336x256, Grayscale
+
+model:
+  name: "yolov8n"
+  pretrained: true
+  img_size: 640  # Will be letterboxed to accommodate 336x256
+  device: 0  # GPU device index (0 for single GPU)
+
+training:
+  epochs: 200  # Increased from 100 to 200 for thermal data convergence (Ding et al., 2024)
+  batch_size: 32  # Optimal for edge devices (Ding et al., 2024)
+  learning_rate: 0.01  # Increased from 0.001 to 0.01 for thermal detection (Ding et al., 2024)
+  momentum: 0.937  # SGD momentum (standard YOLOv8 default)
+  weight_decay: 0.0005  # L2 regularization (standard YOLOv8 default)
+  warmup_epochs: 3
+  optimizer: "SGD"
+  patience: 30  # Early stopping patience
+  
+  # EMA (Exponential Moving Average)
+  ema: true
+  ema_tau: 0.999
+
+data:
+  dataset_path: "data/camel"
+  train_split: "train"
+  val_split: "val"
+  test_split: "test"
+  num_workers: 4
+  pin_memory: true
+  
+  # For YOLO, need to specify number of classes
+  nc: 3  # Number of classes: person, bicycle, vehicle
+  names: ["person", "bicycle", "vehicle"]  # Class names
+
+augmentation:
+  # Probabilities for each augmentation
+  hsv_h: 0.015  # HSV-Hue augmentation
+  hsv_s: 0.7    # HSV-Saturation augmentation
+  hsv_v: 0.4    # HSV-Value augmentation
+  degrees: 10   # Rotation degrees
+  translate: 0.1  # Translation percentage
+  scale: 0.5    # Scale augmentation
+  flipud: 0.5   # Flip upside-down probability
+  fliplr: 0.5   # Flip left-right probability
+  mosaic: 1.0   # Mosaic augmentation probability
+  mixup: 0.1    # Mixup augmentation probability
+
+checkpoint:
+  save_interval: 5  # Save checkpoint every N epochs
+  resume_from: null  # Path to checkpoint to resume from, e.g., "models/checkpoints/yolov8n_epoch_50.pt"
+  save_best: true   # Save best model
+  save_last: true   # Save last model
+
+logging:
+  log_file: "logs/train_yolov8.log"
+  log_interval: 10  # Log metrics every N batches
+  save_metrics: true
+  metrics_file: "logs/yolov8_metrics.json"
+  tensorboard: false  # Use tensorboard logging
+
+validation:
+  val_interval: 5  # Validate every N epochs
+  conf_threshold: 0.25  # Confidence threshold for validation
+  iou_threshold: 0.6   # IoU threshold for NMS
+
+export:
+  onnx: true
+  onnx_opset: 14
+  onnx_path: "models/weights/yolov8n.onnx"
+  
+  tensorrt: false  # Requires CUDA
+  tensorrt_path: "models/weights/yolov8n.trt"

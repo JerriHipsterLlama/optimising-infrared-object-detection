@@ -1,0 +1,121 @@
+# CAMEL Dataset Configuration
+# Defines dataset paths, splits, and metadata
+
+path:
+  root: "data/camel"
+  images: "data/camel/images"
+  labels: "data/camel/labels"
+
+# Dataset splits
+splits:
+  train:
+    images: "data/camel/images/train"
+    labels: "data/camel/labels/train"
+    percentage: 0.7
+  
+  val:
+    images: "data/camel/images/val"
+    labels: "data/camel/labels/val"
+    percentage: 0.15
+  
+  test:
+    images: "data/camel/images/test"
+    labels: "data/camel/labels/test"
+    percentage: 0.15
+
+# Image properties
+image:
+  height: 256
+  width: 336
+  channels: 1  # Grayscale infrared
+  dtype: "uint8"
+
+# Classes
+classes:
+  num_classes: 3
+  names: ["person", "bicycle", "vehicle"]
+  colors:
+    person: [255, 0, 0]      # Red
+    bicycle: [0, 255, 0]     # Green
+    vehicle: [0, 0, 255]     # Blue
+
+# Label format
+label_format: "yolo"  # YOLO format: class_id x_center y_center width height (normalized 0-1)
+
+# Dataset statistics
+statistics:
+  total_sequences: 20
+  total_images: 18367
+  total_annotations: 103509
+  
+  sequences:
+    Seq01: { images: 1488, boxes: 2419 }
+    Seq05: { images: 548, boxes: 1550 }
+    Seq06: { images: 1000, boxes: 6537 }
+    Seq07: { images: 577, boxes: 4439 }
+    Seq08: { images: 450, boxes: 783 }
+    Seq09: { images: 396, boxes: 5061 }
+    Seq10: { images: 394, boxes: 3115 }
+    Seq11: { images: 1323, boxes: 5744 }
+    Seq13: { images: 725, boxes: 2494 }
+    Seq15: { images: 926, boxes: 3058 }
+    Seq17: { images: 897, boxes: 10198 }
+    Seq19: { images: 342, boxes: 2039 }
+    Seq20: { images: 660, boxes: 924 }
+    Seq21: { images: 1113, boxes: 2587 }
+    Seq23: { images: 1117, boxes: 867 }
+    Seq25: { images: 1250, boxes: 5227 }
+    Seq26: { images: 197, boxes: 2226 }
+    Seq27: { images: 1240, boxes: 7150 }
+    Seq28: { images: 2008, boxes: 22536 }
+    Seq29: { images: 877, boxes: 12266 }
+    Seq30: { images: 839, boxes: 2289 }
+
+# Augmentation for CAMEL dataset
+augmentation:
+  # Enable augmentation
+  enabled: true
+  
+  # Infrared-specific augmentations
+  brightness: 0.2
+  contrast: 0.2
+  rotate: 10  # degrees
+  flip_h: 0.5
+  flip_v: 0.0  # Vertical flip usually not applicable for infrared
+  
+  # Thermal noise simulation - disabled, not within scope
+  # gaussian_noise: 0.01
+  
+  # Blur (sensor degradation) - disabled, not within scope
+  # blur: 0.1
+
+# Data loading
+dataloader:
+  batch_size: 32
+  num_workers: 4
+  shuffle_train: true
+  shuffle_val: false
+  shuffle_test: false
+  pin_memory: true
+  drop_last_train: true
+  drop_last_val: false
+  drop_last_test: false
+
+# Preprocessing
+preprocessing:
+  normalize: true
+  normalize_range: [0, 1]  # Normalize to [0, 1]
+  
+  # Optional: standardize with mean/std
+  standardize: false
+  mean: [0.5]  # For grayscale
+  std: [0.5]
+
+# Data validation
+validation:
+  check_image_existence: true
+  check_label_format: true
+  check_image_dimensions: true
+  expected_height: 256
+  expected_width: 336
+  allow_non_standard_sizes: false

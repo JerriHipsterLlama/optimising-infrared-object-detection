@@ -31,6 +31,9 @@ class CAMELDataset(Dataset):
         split (str): 'train', 'val', or 'test'. Default: 'train'
         augment (bool): Apply augmentations (only for training). Default: True
         normalize (bool): Normalize pixel values. Default: True
+        box_format (str): 'yolo' or 'corner'. Default: 'yolo'
+            - 'yolo': (x_center, y_center, width, height) normalized [0, 1]
+            - 'corner': (x1, y1, x2, y2) in pixels for Faster R-CNN
     """
     
     def __init__(
@@ -39,10 +42,15 @@ class CAMELDataset(Dataset):
         split: str = "train",
         augment: bool = True,
         normalize: bool = True,
+        box_format: str = "yolo",
     ):
         """Initialize CAMEL dataset."""
         self.root_dir = Path(root_dir)
         self.split = split
+        self.box_format = box_format.lower()
+        
+        if self.box_format not in ["yolo", "corner"]:
+            raise ValueError(f"box_format must be 'yolo' or 'corner', got {self.box_format}")
         
         self.images_dir = self.root_dir / "images" / split
         self.labels_dir = self.root_dir / "labels" / split
@@ -57,10 +65,14 @@ class CAMELDataset(Dataset):
         self.image_height = 256
         self.image_width = 336
         
-        # Load image paths
+        # Load image paths (support both PNG and JPG formats)
         self.image_files = sorted(self.images_dir.glob("*.png"))
+        self.image_files.extend(sorted(self.images_dir.rglob("*.jpg")))
+        self.image_files.extend(sorted(self.images_dir.rglob("*.jpeg")))
+        self.image_files = sorted(set(self.image_files))  # Remove duplicates and sort
+        
         if len(self.image_files) == 0:
-            raise ValueError(f"No PNG images found in {self.images_dir}")
+            raise ValueError(f"No image files (PNG/JPG) found in {self.images_dir}")
         
         # Load label files (one per sequence)
         self.label_files = sorted(self.labels_dir.glob("*.txt"))
@@ -148,14 +160,16 @@ class CAMELDataset(Dataset):
     
     def _load_labels(self, img_path: Path) -> Dict:
         """
-        Load YOLO format labels for the image.
+        Load YOLO format labels for the image and convert to requested format.
         
         Args:
             img_path (Path): Path to image file
         
         Returns:
             Dict containing:
-                - 'boxes': torch.Tensor of shape (N, 4), YOLO format
+                - 'boxes': torch.Tensor of shape (N, 4)
+                    * if box_format='yolo': (x_center, y_center, width, height) normalized [0,1]
+                    * if box_format='corner': (x1, y1, x2, y2) in pixels
                 - 'class_ids': torch.Tensor of shape (N,)
                 - 'image_path': str
         """
@@ -182,7 +196,18 @@ class CAMELDataset(Dataset):
                         width = float(parts[3])
                         height = float(parts[4])
                         
-                        boxes.append([x_center, y_center, width, height])
+                        if self.box_format == "yolo":
+                            # Keep as YOLO format (normalized)
+                            boxes.append([x_center, y_center, width, height])
+                        elif self.box_format == "corner":
+                            # Convert to corner format (pixels): x1, y1, x2, y2
+                            # Corner format is used by Faster R-CNN
+                            x1 = (x_center - width / 2) * self.image_width
+                            y1 = (y_center - height / 2) * self.image_height
+                            x2 = (x_center + width / 2) * self.image_width
+                            y2 = (y_center + height / 2) * self.image_height
+                            boxes.append([x1, y1, x2, y2])
+                        
                         class_ids.append(class_id)
         
         # Convert to tensors
@@ -231,6 +256,7 @@ def create_dataloaders(
     batch_size: int = 32,
     num_workers: int = 4,
     augment: bool = True,
+    box_format: str = "yolo",
 ) -> Tuple[torch.utils.data.DataLoader, torch.utils.data.DataLoader]:
     """
     Create train and validation dataloaders.
@@ -240,6 +266,9 @@ def create_dataloaders(
         batch_size (int): Batch size. Default: 32
         num_workers (int): Number of data loading workers. Default: 4
         augment (bool): Enable augmentation for training. Default: True
+        box_format (str): 'yolo' or 'corner'. Default: 'yolo'
+            - 'yolo': (x_center, y_center, width, height) normalized [0,1]
+            - 'corner': (x1, y1, x2, y2) in pixels for Faster R-CNN
     
     Returns:
         Tuple of (train_loader, val_loader)
@@ -249,6 +278,7 @@ def create_dataloaders(
         root_dir=data_dir,
         split='train',
         augment=augment,
+        box_format=box_format,
     )
     
     # Validation dataset without augmentation
@@ -256,6 +286,7 @@ def create_dataloaders(
         root_dir=data_dir,
         split='val',
         augment=False,
+        box_format=box_format,
     )
     
     # Create dataloaders
