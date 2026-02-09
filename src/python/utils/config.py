@@ -1,8 +1,3 @@
-"""
-Configuration management for training and inference.
-
-Loads and validates YAML configuration files for models and datasets.
-"""
 
 import yaml
 from pathlib import Path

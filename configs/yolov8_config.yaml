@@ -5,18 +5,20 @@
 model:
   name: "yolov8n"
   pretrained: true
-  img_size: 640  # Will be letterboxed to accommodate 336x256
+  img_size: 336  # Native CAMEL image width (336x256 aspect ratio)
   device: 0  # GPU device index (0 for single GPU)
 
 training:
   epochs: 200  # Increased from 100 to 200 for thermal data convergence (Ding et al., 2024)
-  batch_size: 32  # Optimal for edge devices (Ding et al., 2024)
+  batch_size: 64  # Increased for RTX 3070 (8GB VRAM) - was 32 for Jetson Nano
   learning_rate: 0.01  # Increased from 0.001 to 0.01 for thermal detection (Ding et al., 2024)
   momentum: 0.937  # SGD momentum (standard YOLOv8 default)
   weight_decay: 0.0005  # L2 regularization (standard YOLOv8 default)
   warmup_epochs: 3
   optimizer: "SGD"
   patience: 30  # Early stopping patience
+
+  num_workers: 4  # DataLoader workers
   
   # EMA (Exponential Moving Average)
   ema: true
@@ -31,27 +33,40 @@ data:
   pin_memory: true
   
   # For YOLO, need to specify number of classes
-  nc: 3  # Number of classes: person, bicycle, vehicle
-  names: ["person", "bicycle", "vehicle"]  # Class names
+  nc: 4  # Number of classes: person, bicycle, vehicle, dog
+  names: ["person", "bicycle", "vehicle", "dog"]  # Class names
 
 augmentation:
-  # Probabilities for each augmentation
-  hsv_h: 0.015  # HSV-Hue augmentation
-  hsv_s: 0.7    # HSV-Saturation augmentation
-  hsv_v: 0.4    # HSV-Value augmentation
-  degrees: 10   # Rotation degrees
-  translate: 0.1  # Translation percentage
-  scale: 0.5    # Scale augmentation
-  flipud: 0.5   # Flip upside-down probability
-  fliplr: 0.5   # Flip left-right probability
-  mosaic: 1.0   # Mosaic augmentation probability
-  mixup: 0.1    # Mixup augmentation probability
+  # Ultralytics YOLOv8n defaults for infrared object detection
+  # These must be synchronized with configs/faster_rcnn_config.yaml
+  
+  # Rotation degrees (±rotation)
+  degrees: 15.0
+  
+  # HSV color adjustments
+  hsv_h: 0.015  # Hue (not used for grayscale thermal)
+  hsv_s: 0.7    # Saturation → Contrast adjustment
+  hsv_v: 0.4    # Value → Brightness adjustment
+  
+  # Geometric transformations
+  translate: 0.1  # ±10% translation
+  scale: 0.5      # Scale range: 0.5 to 1.5
+  
+  # Flipping
+  fliplr: 0.5     # Horizontal flip probability (50%)
+  flipud: 0.0     # Vertical flip probability (0% - disabled for thermal)
+  
+  # Occlusion/Cutout
+  erasing: 0.4    # Cutout probability (40%)
+  
+  # Batch augmentation (applied at batch level in YOLOv8)
+  mosaic: 1.0     # Mosaic augmentation mixing ratio
 
 checkpoint:
-  save_interval: 5  # Save checkpoint every N epochs
-  resume_from: null  # Path to checkpoint to resume from, e.g., "models/checkpoints/yolov8n_epoch_50.pt"
-  save_best: true   # Save best model
-  save_last: true   # Save last model
+  save_interval: 5    # Save checkpoint every N epochs
+  resume_from: "models/checkpoints/yolov8n/"   # Path to checkpoint to resume from, e.g., "models/checkpoints/yolov8n_epoch_50.pt"
+  save_best: true     # Save best model
+  save_last: true     # Save last model
 
 logging:
   log_file: "logs/train_yolov8.log"

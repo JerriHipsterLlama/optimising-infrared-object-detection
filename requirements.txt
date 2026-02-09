@@ -10,6 +10,8 @@ numpy==2.4.1
 pandas==3.0.0
 opencv-python==4.13.0.90
 scikit-learn==1.8.0
+albumentations>=1.5.0
+albucore>=1.0.0
 
 # Configuration and Utilities
 PyYAML==6.0.3
