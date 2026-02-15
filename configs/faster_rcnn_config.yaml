@@ -1,0 +1,106 @@
+# Faster R-CNN with MobileNet Backbone Training Configuration
+# Optimized for infrared object detection on CAMEL dataset
+# Image size: 336x256, Grayscale
+
+model:
+  name: "faster_rcnn_mobilenet_v3_large_fpn"
+  pretrained: true
+  img_size: 336  # Native CAMEL image width (336x256 aspect ratio)
+  min_size: 336
+  max_size: 336
+  num_classes: 5  # 4 classes + background
+  device: 0  # GPU device index (0 for single GPU)
+  
+  # MobileNet specific settings
+  backbone_pretrained: true
+  trainable_layers: 3  # Number of trainable backbone layers
+
+training:
+  epochs: 100  # Thermal data convergence (similar to YOLOv8 200 epochs adjusted)
+  batch_size: 8  # Batch size for RTX 3070 (8GB VRAM)
+  learning_rate: 0.001
+  momentum: 0.9
+  weight_decay: 0.0005
+  warmup_epochs: 3
+  optimizer: "SGD"
+  patience: 20  # Early stopping patience
+  
+  num_workers: 0  # DataLoader workers (set to 0 for debugging)
+  accumulation_steps: 1  # Gradient accumulation for effective larger batch size
+
+data:
+  dataset_path: "data/camel"
+  train_split: "train"
+  val_split: "val"
+  test_split: "test"
+  num_workers: 4
+  pin_memory: true
+  
+  # Number of classes
+  num_classes: 5  # background + 4 objects (person, bicycle, vehicle, dog)
+  class_names: ["background", "person", "bicycle", "vehicle", "dog"]
+
+augmentation:
+  # Augmentations matched to YOLOv8n Ultralytics defaults
+  # These must remain synchronized with yolov8_config.yaml
+  
+  # Rotation: degrees
+  degrees: 15.0
+  
+  # Horizontal flip probability (fliplr in YOLOv8)
+  horizontal_flip_p: 0.5
+  
+  # Vertical flip probability (flipud in YOLOv8, typically 0)
+  vertical_flip_p: 0.0
+  
+  # Translation/Shift: corresponds to YOLOv8 translate=0.1 (always applied with random magnitude)
+  translation_limit: 0.1  # ±10% shift
+  
+  # Scale: corresponds to YOLOv8 scale=0.5 (always applied with random magnitude, range: 0.5x to 1.5x)
+  scale_limit: 0.5  # Range: 0.5 to 1.5
+  
+  # Brightness/Contrast: corresponds to HSV adjustments (always applied in YOLOv8)
+  # hsv_s: 0.7 (saturation) → contrast adjustment
+  # hsv_v: 0.4 (value) → brightness adjustment
+  brightness_limit: 0.4  # ±40% brightness (from hsv_v)
+  contrast_limit: 0.7    # ±70% contrast (from hsv_s)
+  
+  # Erasing/Cutout: corresponds to YOLOv8 erasing=0.4
+  cutout_enabled: true
+  cutout_max_holes: 4
+  cutout_max_height: 20
+  cutout_max_width: 20
+  cutout_p: 0.4
+  
+  # Mosaic augmentation (YOLOv8: mosaic=1.0)
+  # NOTE: Mosaic is a batch-level operation in YOLOv8 that combines 4 images.
+  # For Faster R-CNN, this would require custom batch-level preprocessing.
+  # Currently implemented as per-image augmentations only.
+  # TODO: Implement mosaic as batch preprocessing if needed.
+  mosaic_enabled: false  # Future enhancement
+
+checkpoint:
+  save_interval: 5    # Save checkpoint every N epochs
+  resume_from: null   # Path to checkpoint to resume from
+  save_best: true     # Save best model
+  save_last: true     # Save last model
+
+logging:
+  log_file: "logs/train_faster_rcnn.log"
+  log_interval: 10  # Log metrics every N batches
+  save_metrics: true
+  metrics_file: "logs/faster_rcnn_metrics.json"
+  tensorboard: false  # Use tensorboard logging
+
+validation:
+  val_interval: 5  # Validate every N epochs
+  conf_threshold: 0.5  # Confidence threshold for validation
+  iou_threshold: 0.5  # IoU threshold for NMS
+
+export:
+  onnx: true
+  onnx_opset: 14
+  onnx_path: "models/weights/faster_rcnn_mobilenet.onnx"
+  
+  tensorrt: false  # Requires CUDA
+  tensorrt_path: "models/weights/faster_rcnn_mobilenet.trt"

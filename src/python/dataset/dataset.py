@@ -90,19 +90,17 @@ class CAMELDataset(Dataset):
         """
         Build a mapping from image files to their corresponding label files.
         
-        Labels are stored per-sequence (Seq##.txt), so we need to find which
-        sequence each image belongs to.
+        Labels are stored per-image (Seq##_######.txt), matching the image filename.
         
         Example:
-            Image: Seq01_001.png → Label: Seq01.txt
-            Image: Seq05_042.png → Label: Seq05.txt
+            Image: Seq01_000001.png → Label: Seq01_000001.txt
+            Image: Seq05_000042.png → Label: Seq05_000042.txt
         """
         self.image_to_labels = {}
         
         for img_file in self.image_files:
-            # Extract sequence number from filename (e.g., "Seq01" from "Seq01_001.png")
-            seq_name = img_file.stem.split("_")[0]  # Get "Seq01" part
-            label_file = self.labels_dir / f"{seq_name}.txt"
+            # Label file has same name as image file but with .txt extension
+            label_file = self.labels_dir / f"{img_file.stem}.txt"
             
             if label_file.exists():
                 self.image_to_labels[str(img_file)] = str(label_file)
@@ -173,9 +171,8 @@ class CAMELDataset(Dataset):
                 - 'class_ids': torch.Tensor of shape (N,)
                 - 'image_path': str
         """
-        # Map labels by sequence name derived from the image filename
-        seq_name = img_path.stem.split("_")[0]
-        label_file = self.labels_dir / f"{seq_name}.txt"
+        # Label file has same name as image file but with .txt extension
+        label_file = self.labels_dir / f"{img_path.stem}.txt"
         
         boxes = []
         class_ids = []

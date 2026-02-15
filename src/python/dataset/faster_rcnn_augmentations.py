@@ -1,0 +1,210 @@
+"""
+Albumentations-based augmentations for Faster R-CNN training on infrared images.E
+"""
+
+import albumentations as A
+from albumentations.pytorch import ToTensorV2
+import numpy as np
+from typing import Dict, Tuple
+import cv2
+
+
+class FasterRCNNAugmentations:
+    """
+    Augmentation pipeline for Faster R-CNN training on infrared CAMEL dataset.
+    
+    Applies geometric and color augmentations with bounding box handling.
+    Images are kept in [0, 1] range (no standardization) to match YOLOv8 preprocessing.
+    
+    Args:
+        config (dict): Augmentation configuration from faster_rcnn_config.yaml
+        img_size (tuple): Image size (height, width), e.g., (256, 336)
+    """
+    
+    def __init__(self, config: dict, img_size: Tuple[int, int] = (256, 336)):
+        self.config = config
+        self.height, self.width = img_size
+        
+        # Build augmentation pipeline
+        self.transform = self._build_augmentation_pipeline()
+    
+    def _build_augmentation_pipeline(self) -> A.Compose:
+        """Build albumentations augmentation pipeline"""
+        
+        transforms = []
+        
+        # 1. GEOMETRIC AUGMENTATIONS
+        
+        # Rotation + Translation + Scale combined
+        # Defaults: degrees=15.0, translate=0.1, scale=0.5
+        transforms.append(
+            A.Affine(
+                translate_percent={'x': (-self.config.get('translation_limit', 0.1), self.config.get('translation_limit', 0.1)),
+                                   'y': (-self.config.get('translation_limit', 0.1), self.config.get('translation_limit', 0.1))},
+                scale=(1.0 - self.config.get('scale_limit', 0.5), 1.0 + self.config.get('scale_limit', 0.5)),
+                rotate=(-int(self.config.get('degrees', 15.0)), int(self.config.get('degrees', 15.0))),
+                interpolation=cv2.INTER_LINEAR,
+                border_mode=cv2.BORDER_REFLECT_101,
+                fill=0,
+                p=1.0  # Always apply rotation (Similar to YOLOv8 behavior)
+            )
+        )
+        
+        # Horizontal flip
+        # YOLOv8: fliplr=0.5
+        if self.config.get('horizontal_flip_p', 0.5) > 0:
+            transforms.append(
+                A.HorizontalFlip(
+                    p=self.config.get('horizontal_flip_p', 0.5)
+                )
+            )
+
+        # 2. COLOR/BRIGHTNESS AUGMENTATIONS (approximating HSV adjustments)
+
+        # YOLOv8: hsv_s=0.7, hsv_v=0.4 (always applied)
+        # For grayscale infrared: use brightness/contrast to approximate HSV
+        
+        transforms.append(
+            A.RandomBrightnessContrast(
+                brightness_limit=self.config.get('brightness_limit', 0.4),
+                contrast_limit=self.config.get('contrast_limit', 0.4),
+                p=1.0  # Always apply (YOLOv8 behavior)
+            )
+        )
+        
+        # 3. CUTOUT/ERASING AUGMENTATION
+        # YOLOv8: erasing=0.4
+        
+        if self.config.get('cutout_enabled', True):
+            max_holes = self.config.get('cutout_max_holes', 4)
+            max_h = self.config.get('cutout_max_height', 20)
+            max_w = self.config.get('cutout_max_width', 20)
+            transforms.append(
+                A.CoarseDropout(
+                    num_holes_range=(1, max_holes),
+                    hole_height_range=(max_h, max_h),  # Fixed size holes
+                    hole_width_range=(max_w, max_w),   # Fixed size holes
+                    fill=0,
+                    fill_mask=None,
+                    p=self.config.get('cutout_p', 0.4)
+                )
+            )
+        
+        # 4. CONVERT TO TENSOR
+        # Before ToTensorV2: np.ndarray shape (256, 336, 1), dtype float32
+        # After ToTensorV2: torch.Tensor shape (1, 256, 336), dtype float32
+        
+        transforms.append(ToTensorV2())
+        
+        # Create Compose with bbox params for proper label transformation
+        return A.Compose(
+            transforms,
+            bbox_params=A.BboxParams(
+                format='yolo',  # (x_center, y_center, width, height) normalized [0, 1]
+                label_fields=['class_labels'],
+                min_visibility=0.2,  # Keep boxes with at least 20% visibility
+                min_area=0.001,  # Minimum bbox area (1% of image)
+                clip=True,  # Clip bboxes to image boundaries
+            )
+        )
+    
+    def __call__(self, image: np.ndarray, bboxes: list, class_ids: list) -> Tuple[np.ndarray, list, list]:
+        """
+        Apply augmentations to image and bounding boxes. Match __call__ signature convention of PyTorch
+        
+        Args:
+            image (np.ndarray): Input image, shape (H, W) or (H, W, C), values in [0, 1]
+            bboxes (list): List of bounding boxes in format (x1, y1, x2, y2) in pixels
+            class_ids (list): List of class IDs for each bbox
+        
+        Returns:
+            Tuple of (augmented_image, augmented_bboxes, augmented_class_ids)
+        """
+        
+        # Ensure image is in correct format
+        if len(image.shape) == 2:
+            image = np.expand_dims(image, axis=-1)  # (H, W) → (H, W, 1)
+        
+        # Ensure image is float32 in [0, 1]
+        if image.dtype != np.float32:
+            if image.max() > 1.0:
+                image = image.astype(np.float32) / 255.0
+            else:
+                image = image.astype(np.float32)
+        
+        image = np.clip(image, 0.0, 1.0)
+        
+        # Apply augmentation (albumentations handles bbox transformation)
+        if bboxes and len(bboxes) > 0:
+            augmented = self.transform(
+                image=image,
+                bboxes=bboxes,
+                class_labels=class_ids
+            )
+            augmented_image = augmented['image']
+            augmented_bboxes = augmented['bboxes']
+            augmented_class_ids = augmented['class_labels']
+        else:
+            # No bboxes case
+            augmented = self.transform(image=image, bboxes=[], class_labels=[])
+            augmented_image = augmented['image']
+            augmented_bboxes = []
+            augmented_class_ids = []
+        
+        return augmented_image, augmented_bboxes, augmented_class_ids
+
+
+class InferenceAugmentations:
+    """
+    Minimal augmentations for inference (no geometric transforms).
+    Images are kept in [0, 1] range (no standardization) to match YOLOv8 preprocessing.
+    This is necessary as the inout labels are formatted for YOLO and the model 
+    expects the same format during inference.
+
+    TODO: Replace with C++ implementation for faster inference and to avoid unnecessary
+    conversions between numpy and torch tensors.
+    """
+    
+    def __init__(self, img_size: Tuple[int, int] = (256, 336)):
+        self.height, self.width = img_size
+        
+        transforms = []
+        
+        # No standardization - images remain in [0, 1] range for fair comparison with YOLOv8
+        transforms.append(ToTensorV2())
+        
+        self.transform = A.Compose(
+            transforms,
+            bbox_params=A.BboxParams(
+                format='pascal_voc',
+                label_fields=['class_labels'],
+                min_visibility=0.0,
+            )
+        )
+    
+    def __call__(self, image: np.ndarray, bboxes: list = None, class_ids: list = None):
+        """Apply inference augmentations (tensor conversion only)."""
+        
+        if len(image.shape) == 2:
+            image = np.expand_dims(image, axis=-1)
+        
+        if image.dtype != np.float32:
+            if image.max() > 1.0:
+                image = image.astype(np.float32) / 255.0
+            else:
+                image = image.astype(np.float32)
+        
+        image = np.clip(image, 0.0, 1.0)
+        
+        if bboxes is None:
+            bboxes = []
+        if class_ids is None:
+            class_ids = []
+        
+        augmented = self.transform(
+            image=image,
+            bboxes=bboxes,
+            class_labels=class_ids
+        )
+        
+        return augmented['image'], augmented['bboxes'], augmented['class_labels']

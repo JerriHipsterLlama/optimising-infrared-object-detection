@@ -45,7 +45,7 @@ augmentation:
   
   # HSV color adjustments
   hsv_h: 0.015  # Hue (not used for grayscale thermal)
-  hsv_s: 0.7    # Saturation → Contrast adjustment
+  hsv_s: 0.0    # Saturation → Contrast adjustment (unused for grayscale)
   hsv_v: 0.4    # Value → Brightness adjustment
   
   # Geometric transformations
