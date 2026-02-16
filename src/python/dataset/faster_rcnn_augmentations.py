@@ -114,7 +114,7 @@ class FasterRCNNAugmentations:
         
         Args:
             image (np.ndarray): Input image, shape (H, W) or (H, W, C), values in [0, 1]
-            bboxes (list): List of bounding boxes in format (x1, y1, x2, y2) in pixels
+            bboxes (list): List of bounding boxes in YOLO format (x_center, y_center, width, height) normalized
             class_ids (list): List of class IDs for each bbox
         
         Returns:
@@ -134,18 +134,41 @@ class FasterRCNNAugmentations:
         
         image = np.clip(image, 0.0, 1.0)
         
+        # Quick validation to catch any edge cases
+        # (main validation happens in CAMELFasterRCNNDataset.__getitem__)
+        valid_bboxes = []
+        valid_class_ids = []
+        for bbox, cls_id in zip(bboxes, class_ids):
+            if len(bbox) == 4:
+                x_center, y_center, width, height = bbox
+                # Basic sanity check
+                if width > 0 and height > 0:
+                    valid_bboxes.append(bbox)
+                    valid_class_ids.append(cls_id)
+        
         # Apply augmentation (albumentations handles bbox transformation)
-        if bboxes and len(bboxes) > 0:
-            augmented = self.transform(
-                image=image,
-                bboxes=bboxes,
-                class_labels=class_ids
-            )
-            augmented_image = augmented['image']
-            augmented_bboxes = augmented['bboxes']
-            augmented_class_ids = augmented['class_labels']
+        if valid_bboxes:
+            try:
+                augmented = self.transform(
+                    image=image,
+                    bboxes=valid_bboxes,
+                    class_labels=valid_class_ids
+                )
+                augmented_image = augmented['image']
+                augmented_bboxes = augmented['bboxes']
+                augmented_class_ids = augmented['class_labels']
+            except (ValueError, AssertionError) as e:
+                # If transformation still fails, return original image with valid boxes
+                print(f"Warning: Albumentations transform failed: {e}")
+                print(f"         Returning image without augmentation")
+                # Convert to tensor manually
+                from albumentations.pytorch import ToTensorV2
+                tensor_transform = ToTensorV2()
+                augmented_image = tensor_transform(image=image)['image']
+                augmented_bboxes = valid_bboxes
+                augmented_class_ids = valid_class_ids
         else:
-            # No bboxes case
+            # No valid bboxes case
             augmented = self.transform(image=image, bboxes=[], class_labels=[])
             augmented_image = augmented['image']
             augmented_bboxes = []
@@ -173,14 +196,8 @@ class InferenceAugmentations:
         # No standardization - images remain in [0, 1] range for fair comparison with YOLOv8
         transforms.append(ToTensorV2())
         
-        self.transform = A.Compose(
-            transforms,
-            bbox_params=A.BboxParams(
-                format='pascal_voc',
-                label_fields=['class_labels'],
-                min_visibility=0.0,
-            )
-        )
+        # No bbox_params needed since ToTensorV2 doesn't modify bounding boxes
+        self.transform = A.Compose(transforms)
     
     def __call__(self, image: np.ndarray, bboxes: list = None, class_ids: list = None):
         """Apply inference augmentations (tensor conversion only)."""
@@ -201,10 +218,7 @@ class InferenceAugmentations:
         if class_ids is None:
             class_ids = []
         
-        augmented = self.transform(
-            image=image,
-            bboxes=bboxes,
-            class_labels=class_ids
-        )
+        # Only transform image (no bbox processing in inference)
+        augmented = self.transform(image=image)
         
-        return augmented['image'], augmented['bboxes'], augmented['class_labels']
+        return augmented['image'], bboxes, class_ids

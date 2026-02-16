@@ -4,4 +4,4 @@ data/*.txt
 build/**
 /.venv/*
 **/__pycache__/**
-/runs/**
+/models/checkpoints/**/train**

@@ -10,7 +10,7 @@ model:
 
 training:
   epochs: 200  # Increased from 100 to 200 for thermal data convergence (Ding et al., 2024)
-  batch_size: 64  # Increased for RTX 3070 (8GB VRAM) - was 32 for Jetson Nano
+  batch_size: 16  # Auto batch size based on GPU memory (Ultralytics default)
   learning_rate: 0.01  # Increased from 0.001 to 0.01 for thermal detection (Ding et al., 2024)
   momentum: 0.937  # SGD momentum (standard YOLOv8 default)
   weight_decay: 0.0005  # L2 regularization (standard YOLOv8 default)
@@ -64,7 +64,7 @@ augmentation:
 
 checkpoint:
   save_interval: 5    # Save checkpoint every N epochs
-  resume_from: "models/checkpoints/yolov8n/"   # Path to checkpoint to resume from, e.g., "models/checkpoints/yolov8n_epoch_50.pt"
+  resume_from: "models/checkpoints/yolov8"   # Path to checkpoint directory
   save_best: true     # Save best model
   save_last: true     # Save last model
 

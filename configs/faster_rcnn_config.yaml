@@ -13,27 +13,30 @@ model:
   
   # MobileNet specific settings
   backbone_pretrained: true
-  trainable_layers: 3  # Number of trainable backbone layers
+  trainable_layers: 6  # Number of trainable backbone layers
 
 training:
-  epochs: 100  # Thermal data convergence (similar to YOLOv8 200 epochs adjusted)
+  epochs: 200  # Thermal data convergence (similar to YOLOv8 200 epochs adjusted)
   batch_size: 8  # Batch size for RTX 3070 (8GB VRAM)
-  learning_rate: 0.001
-  momentum: 0.9
+  learning_rate: 0.001  # 10x lower than YOLOv8 (0.01) due to two-stage architecture
+  momentum: 0.937
   weight_decay: 0.0005
   warmup_epochs: 3
   optimizer: "SGD"
-  patience: 20  # Early stopping patience
+  patience: 30  # Early stopping patience
   
-  num_workers: 0  # DataLoader workers (set to 0 for debugging)
   accumulation_steps: 1  # Gradient accumulation for effective larger batch size
+  
+  # EMA (Exponential Moving Average)
+  ema: true
+  ema_tau: 0.999
 
 data:
   dataset_path: "data/camel"
   train_split: "train"
   val_split: "val"
   test_split: "test"
-  num_workers: 4
+  num_workers: 6
   pin_memory: true
   
   # Number of classes
@@ -80,7 +83,7 @@ augmentation:
   mosaic_enabled: false  # Future enhancement
 
 checkpoint:
-  save_interval: 5    # Save checkpoint every N epochs
+  save_interval: 4    # Save checkpoint every N epochs
   resume_from: null   # Path to checkpoint to resume from
   save_best: true     # Save best model
   save_last: true     # Save last model
