@@ -43,6 +43,9 @@ def train_yolov8(
     batch_size = batch_size or config['training']['batch_size']
     img_size = img_size or config['model']['img_size']
     
+    # Setup absolute checkpoint directory to avoid runs/detect/ prefix
+    checkpoint_dir = Path(config['checkpoint']['resume_from']).resolve()
+    
     # Initialize model
     model = YOLO(config['model']['name'])
     
@@ -72,7 +75,7 @@ def train_yolov8(
         patience=config['training']['patience'],
         save=True,
         save_period=config['checkpoint']['save_interval'],
-        project=config['checkpoint']['resume_from'],
+        project=str(checkpoint_dir),  # Use absolute path to avoid runs/detect/ prefix
         name='train',
         resume=resume,
         pretrained=config['model']['pretrained'],
@@ -96,7 +99,7 @@ def train_yolov8(
     )
     
     print(f"\nTraining completed!")
-    print(f"  Results saved to: models/checkpoints/yolov8n/train")
+    print(f"  Results saved to: {checkpoint_dir}/train")
     
     # Export to ONNX if configured
     if config['export']['onnx']:
