@@ -58,12 +58,44 @@ def train_yolov8(
             f"Make sure you have data/camel/camel.yaml configured"
         )
     
+    # Verify dataset integrity - count images and labels
+    dataset_root = Path(config['data']['dataset_path'])
+    train_images_dir = dataset_root / 'images' / 'train'
+    train_labels_dir = dataset_root / 'labels' / 'train'
+    val_images_dir = dataset_root / 'images' / 'val'
+    val_labels_dir = dataset_root / 'labels' / 'val'
+    
+    # Count files
+    train_images = list(train_images_dir.glob('*.npy')) if train_images_dir.exists() else []
+    train_labels = list(train_labels_dir.glob('*.txt')) if train_labels_dir.exists() else []
+    val_images = list(val_images_dir.glob('*.npy')) if val_images_dir.exists() else []
+    val_labels = list(val_labels_dir.glob('*.txt')) if val_labels_dir.exists() else []
+    
+    print(f"\n{'='*60}")
+    print(f"DATASET VERIFICATION")
+    print(f"{'='*60}")
+    print(f"Training Set:")
+    print(f"  Images: {len(train_images)}")
+    print(f"  Labels: {len(train_labels)}")
+    print(f"  Match: {'✓' if len(train_images) == len(train_labels) else '✗ MISMATCH!'}")
+    print(f"\nValidation Set:")
+    print(f"  Images: {len(val_images)}")
+    print(f"  Labels: {len(val_labels)}")
+    print(f"  Match: {'✓' if len(val_images) == len(val_labels) else '✗ MISMATCH!'}")
+    print(f"{'='*60}\n")
+    
+    if len(train_images) != len(train_labels):
+        print(f"WARNING: Training images ({len(train_images)}) != labels ({len(train_labels)})")
+    if len(val_images) != len(val_labels):
+        print(f"WARNING: Validation images ({len(val_images)}) != labels ({len(val_labels)})")
+    
     print(f"Training YOLOv8n on infrared dataset...")
     print(f"  Config file: {config_path}")
     print(f"  Dataset: {dataset_yaml}")
     print(f"  Image size: {img_size}")
     print(f"  Epochs: {epochs}")
     print(f"  Batch size: {batch_size}")
+    print(f"  Expected batches per epoch: {len(train_images) // batch_size}")
     
     # Train with settings from config
     results = model.train(
@@ -95,7 +127,7 @@ def train_yolov8(
         close_mosaic=15,
         
         verbose=True,
-        compile=True,
+        compile=False,  # Disable compilation for better compatibility and debugging
     )
     
     print(f"\nTraining completed!")
