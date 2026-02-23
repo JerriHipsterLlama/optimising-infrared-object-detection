@@ -4,32 +4,38 @@
 
 model:
   name: "faster_rcnn_mobilenet_v3_large_fpn"
-  pretrained: true
+  pretrained: true  # Use COCO pretrained weights (CRITICAL for convergence!)
   img_size: 336  # Native CAMEL image width (336x256 aspect ratio)
   min_size: 336
   max_size: 336
   num_classes: 5  # 4 classes + background
   device: 0  # GPU device index (0 for single GPU)
-  
+
   # MobileNet specific settings
   backbone_pretrained: true
   trainable_layers: 6  # Number of trainable backbone layers
 
+  # Performance optimizations (PyTorch 2.0+)
+  compile: false  # Set to true for 20-50% speedup with PyTorch 2.0+ (longer startup)
+
 training:
   epochs: 200  # Thermal data convergence (similar to YOLOv8 200 epochs adjusted)
-  batch_size: 8  # Batch size for RTX 3070 (8GB VRAM)
-  learning_rate: 0.001  # 10x lower than YOLOv8 (0.01) due to two-stage architecture
+  batch_size: 16  # Batch size for RTX 3070 (8GB VRAM)
+  learning_rate: 0.005  # Increased from 0.001 to 0.005 with pretrained weights + warmup
   momentum: 0.937
   weight_decay: 0.0005
-  warmup_epochs: 3
+  warmup_epochs: 3  # Linear warmup for first 3 epochs (now IMPLEMENTED)
   optimizer: "SGD"
   patience: 30  # Early stopping patience
-  
+  max_grad_norm: 10.0  # Gradient clipping to prevent explosion
+
   accumulation_steps: 1  # Gradient accumulation for effective larger batch size
-  
+
   # EMA (Exponential Moving Average)
   ema: true
   ema_tau: 0.999
+
+  # Scheduler: CosineAnnealingLR (like YOLO, replaces StepLR)
 
 data:
   dataset_path: "data/camel"
@@ -38,7 +44,11 @@ data:
   test_split: "test"
   num_workers: 6
   pin_memory: true
-  
+
+  # Performance optimizations
+  cache_images: false  # Cache images in RAM (faster but uses 2-4GB RAM) - set to true if RAM available
+  prefetch_factor: 2   # Number of batches to prefetch per worker (increase to 4-8 if GPU underutilized)
+
   # Number of classes
   num_classes: 5  # background + 4 objects (person, bicycle, vehicle, dog)
   class_names: ["background", "person", "bicycle", "vehicle", "dog"]
@@ -90,14 +100,14 @@ checkpoint:
 
 logging:
   log_file: "logs/train_faster_rcnn.log"
-  log_interval: 10  # Log metrics every N batches
+  log_interval: 50  # Log metrics every N batches (increased from 10 for better performance)
   save_metrics: true
   metrics_file: "logs/faster_rcnn_metrics.json"
   tensorboard: false  # Use tensorboard logging
 
 validation:
   val_interval: 5  # Validate every N epochs
-  conf_threshold: 0.5  # Confidence threshold for validation
+  conf_threshold: 0.25  # Confidence threshold for validation (YOLO standard)
   iou_threshold: 0.5  # IoU threshold for NMS
 
 export:

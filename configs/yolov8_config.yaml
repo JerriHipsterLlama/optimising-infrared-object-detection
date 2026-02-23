@@ -29,7 +29,7 @@ data:
   train_split: "train"
   val_split: "val"
   test_split: "test"
-  num_workers: 4
+  num_workers: 6
   pin_memory: true
   
   # For YOLO, need to specify number of classes
