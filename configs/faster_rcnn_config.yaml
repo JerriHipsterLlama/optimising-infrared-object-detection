@@ -21,7 +21,7 @@ model:
 training:
   epochs: 200  # Thermal data convergence (similar to YOLOv8 200 epochs adjusted)
   batch_size: 16  # Batch size for RTX 3070 (8GB VRAM)
-  learning_rate: 0.005  # Increased from 0.001 to 0.005 with pretrained weights + warmup
+  learning_rate: 0.001  # Increased from 0.001 to 0.005 with pretrained weights + warmup
   momentum: 0.937
   weight_decay: 0.0005
   warmup_epochs: 3  # Linear warmup for first 3 epochs (now IMPLEMENTED)
@@ -74,9 +74,9 @@ augmentation:
   
   # Brightness/Contrast: corresponds to HSV adjustments (always applied in YOLOv8)
   # hsv_s: 0.7 (saturation) → contrast adjustment
-  # hsv_v: 0.4 (value) → brightness adjustment
+  # hsv_v: 0.0 (value) → brightness adjustment
   brightness_limit: 0.4  # ±40% brightness (from hsv_v)
-  contrast_limit: 0.7    # ±70% contrast (from hsv_s)
+  contrast_limit: 0.0    # ±0% contrast (from hsv_s)
   
   # Erasing/Cutout: corresponds to YOLOv8 erasing=0.4
   cutout_enabled: true

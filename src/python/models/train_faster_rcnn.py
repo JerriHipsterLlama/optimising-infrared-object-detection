@@ -254,180 +254,6 @@ def collate_fn(batch):
 
     return images, targets
 
-class CAMELFasterRCNNDataset(CAMELDataset):
-    """Extended CAMEL dataset with augmentations for Faster R-CNN."""
-
-    def __init__(self, root_dir: str, split: str = "train", augment: bool = True, config: dict = None, cache_images: bool = False):
-        """Initialize with Faster R-CNN specific settings."""
-        super().__init__(
-            root_dir=root_dir,
-            split=split,
-            augment=augment,
-            normalize=False,  # Faster R-CNN augmentations handle normalization
-            box_format='yolo',  # Use YOLO format (normalized) for albumentations
-        )
-
-        self.config = config or {}
-        self.split = split
-        self.cache_images = cache_images
-        self._image_cache = {} if cache_images else None
-
-        # Setup augmentations
-        if split == "train" and augment:
-            self.augmentation = FasterRCNNAugmentations(
-                config=self.config.get('augmentation', {}),
-                img_size=(self.image_height, self.image_width)
-            )
-        else:
-            self.augmentation = InferenceAugmentations(
-                img_size=(self.image_height, self.image_width)
-            )
-
-        # Cache images if requested
-        if self.cache_images:
-            print(f"Caching {len(self.image_files)} images for {split} split...")
-            for idx, img_path in enumerate(tqdm(self.image_files, desc=f"Caching {split}")):
-                self._image_cache[idx] = self._load_image(img_path)
-
-    def __getitem__(self, idx: int):
-        """Load image and apply augmentations."""
-        img_path = self.image_files[idx]
-
-        # Load image (from cache or disk)
-        if self.cache_images:
-            image = self._image_cache[idx].copy()  # Copy cached image for augmentation
-        else:
-            image = self._load_image(img_path)
-
-        # Load labels
-        targets = self._load_labels(img_path)
-
-        # Convert boxes to list for augmentation pipeline (albumentations expects lists)
-        boxes = targets['boxes'].tolist() if len(targets['boxes']) > 0 else []
-        class_ids = targets['class_ids'].tolist() if len(targets['class_ids']) > 0 else []
-
-        # Validate and clean boxes before augmentation (vectorized)
-        # This step ensures that we don't pass invalid boxes to the augmentation pipeline, which can cause errors.
-        if boxes:
-            boxes_tensor = torch.tensor(boxes, dtype=torch.float32)
-            class_ids_tensor = torch.tensor(class_ids, dtype=torch.long)
-
-            # Extract box components
-            x_center = boxes_tensor[:, 0]
-            y_center = boxes_tensor[:, 1]
-            width = boxes_tensor[:, 2]
-            height = boxes_tensor[:, 3]
-
-            # Filter out boxes with non-positive dimensions
-            valid_dims = (width > 0.0) & (height > 0.0)
-
-            # Calculate corners and clip to valid range [0, 1]
-            x_min = torch.clamp(x_center - width / 2, 0.0, 1.0)
-            y_min = torch.clamp(y_center - height / 2, 0.0, 1.0)
-            x_max = torch.clamp(x_center + width / 2, 0.0, 1.0)
-            y_max = torch.clamp(y_center + height / 2, 0.0, 1.0)
-
-            # Recompute dimensions after clipping
-            width_clipped = x_max - x_min
-            height_clipped = y_max - y_min
-
-            # Check if box is still valid after clipping (minimum size threshold)
-            valid_size = (width_clipped >= 0.001) & (height_clipped >= 0.001)
-
-            # Combined validity mask
-            valid_mask = valid_dims & valid_size
-
-            if valid_mask.any():
-                # Recompute centers after clipping
-                x_center_clipped = (x_min + x_max) / 2
-                y_center_clipped = (y_min + y_max) / 2
-
-                # Stack valid boxes and convert to list for albumentations
-                valid_boxes_tensor = torch.stack([
-                    x_center_clipped[valid_mask],
-                    y_center_clipped[valid_mask],
-                    width_clipped[valid_mask],
-                    height_clipped[valid_mask]
-                ], dim=1)
-
-                boxes = valid_boxes_tensor.tolist()
-                class_ids = class_ids_tensor[valid_mask].tolist()
-            else:
-                boxes = []
-                class_ids = []
-
-        # Apply augmentations with error handling (only for training, validation uses simple transforms)
-        if self.split == "train":
-            try:
-                image, boxes, class_ids = self.augmentation(image, boxes, class_ids)
-            except (ValueError, AssertionError) as e:
-                # If augmentation fails, use original image with basic preprocessing
-                print(f"Warning: Augmentation failed for {img_path.name}: {e}")
-                print(f"         Using fallback preprocessing. Valid boxes: {len(boxes)}")
-
-                # Basic preprocessing without augmentation
-                if len(image.shape) == 2:
-                    image = np.expand_dims(image, axis=-1)
-                if image.dtype != np.float32:
-                    if image.max() > 1.0:
-                        image = image.astype(np.float32) / 255.0
-                    else:
-                        image = image.astype(np.float32)
-                image = np.clip(image, 0.0, 1.0)
-                image = torch.from_numpy(image).permute(2, 0, 1)
-        else:
-            # Validation: always use simple augmentation (no failures expected)
-            image, boxes, class_ids = self.augmentation(image, boxes, class_ids)
-
-        # Safeguard: Validate augmentation output
-        if not boxes or len(boxes) == 0:
-            # No objects remain after augmentation - return empty tensors
-            targets['boxes'] = torch.zeros((0, 4), dtype=torch.float32)
-            targets['class_ids'] = torch.zeros((0,), dtype=torch.long)
-        else:
-            # Convert YOLO format (normalized) to corner format (pixels) for Faster R-CNN (vectorized)
-
-            boxes_tensor = torch.tensor(boxes, dtype=torch.float32)
-            class_ids_tensor = torch.tensor(class_ids, dtype=torch.long)
-
-            # Extract box components
-            x_center = boxes_tensor[:, 0]
-            y_center = boxes_tensor[:, 1]
-            width = boxes_tensor[:, 2]
-            height = boxes_tensor[:, 3]
-
-            # Filter out invalid dimensions
-            valid_dims = (width > 0) & (height > 0)
-
-            if valid_dims.any():
-                # Convert to corner format (pixels)
-                x1 = (x_center - width / 2) * self.image_width
-                y1 = (y_center - height / 2) * self.image_height
-                x2 = (x_center + width / 2) * self.image_width
-                y2 = (y_center + height / 2) * self.image_height
-
-                # Clip to image boundaries
-                x1 = torch.clamp(x1, 0, self.image_width)
-                y1 = torch.clamp(y1, 0, self.image_height)
-                x2 = torch.clamp(x2, 0, self.image_width)
-                y2 = torch.clamp(y2, 0, self.image_height)
-
-                # Final validation: ensure at least 1 pixel in each dimension
-                valid_final = (x2 > x1 + 1.0) & (y2 > y1 + 1.0) & valid_dims
-
-                if valid_final.any():
-                    # Stack valid boxes
-                    corner_boxes = torch.stack([x1[valid_final], y1[valid_final], x2[valid_final], y2[valid_final]], dim=1)
-                    targets['boxes'] = corner_boxes
-                    targets['class_ids'] = class_ids_tensor[valid_final]
-                else:
-                    targets['boxes'] = torch.zeros((0, 4), dtype=torch.float32)
-                    targets['class_ids'] = torch.zeros((0,), dtype=torch.long)
-            else:
-                targets['boxes'] = torch.zeros((0, 4), dtype=torch.float32)
-                targets['class_ids'] = torch.zeros((0,), dtype=torch.long)
-
-        return image, targets
 
 # ==============================================================================
 # TRAINING CORE
@@ -474,13 +300,28 @@ def train_epoch(model, data_loader, optimizer, device, config: dict, epoch: int,
         # Forward pass
         loss_dict = model(images, targets)
 
-        # Check for NaN in losses before backward pass
-        has_nan = any(torch.isnan(v) or torch.isinf(v) for v in loss_dict.values())
+        # Handle empty target batches: When all targets are empty, classifier and
+        # box_reg losses will be NaN (no positive samples). This is expected behavior.
+        all_empty = all(t['boxes'].shape[0] == 0 for t in targets)
+        
+        if all_empty:
+            # For all-empty batches, replace NaN losses with 0 (no positive samples)
+            # but keep RPN losses which are valid (learning to not propose boxes)
+            loss_dict_clean = {}
+            for loss_name, loss_value in loss_dict.items():
+                if torch.isnan(loss_value):
+                    loss_dict_clean[loss_name] = torch.tensor(0.0, device=device)
+                else:
+                    loss_dict_clean[loss_name] = loss_value
+            loss_dict = loss_dict_clean
+        else:
+            # For batches with at least some non-empty targets, check for unexpected NaN
+            has_nan = any(torch.isnan(v) or torch.isinf(v) for v in loss_dict.values())
 
-        if has_nan:
-            if (batch_idx + 1) % log_interval == 0:
-                logger.warning(f"Skipping batch {batch_idx+1} due to NaN/Inf in losses")
-            continue
+            if has_nan:
+                if (batch_idx + 1) % log_interval == 0:
+                    logger.warning(f"Skipping batch {batch_idx+1} due to NaN/Inf in losses")
+                continue
 
         losses = sum(loss for loss in loss_dict.values())
 
@@ -604,11 +445,6 @@ def validate(model, data_loader, device, config: dict, epoch: int, logger, ema=N
         images = [img.to(device) for img in images]
         targets = [{k: v.to(device) for k, v in t.items()} for t in targets]
 
-        # Skip batches where all images have no targets (can cause NaN in loss)
-        valid_targets = [t for t in targets if len(t['boxes']) > 0]
-        if len(valid_targets) == 0:
-            logger.warning(f"Skipping batch with no valid targets at epoch {epoch+1}")
-            continue
 
         # Compute validation loss (requires train mode for Faster R-CNN)
         model.train()
@@ -616,17 +452,33 @@ def validate(model, data_loader, device, config: dict, epoch: int, logger, ema=N
             try:
                 loss_dict = model(images, targets)
 
-                # Check for NaN in losses
-                has_nan = False
-                for loss_name, loss_value in loss_dict.items():
-                    if torch.isnan(loss_value) or torch.isinf(loss_value):
-                        logger.warning(f"NaN/Inf detected in validation {loss_name} at epoch {epoch+1}")
-                        has_nan = True
+                # Handle empty target batches: When all targets are empty, classifier and
+                # box_reg losses will be NaN (no positive samples). This is expected behavior.
+                # We use only the valid RPN losses for these batches (objectness, rpn_box_reg).
+                all_empty = all(t['boxes'].shape[0] == 0 for t in targets)
+                
+                if all_empty:
+                    # For all-empty batches, replace NaN losses with 0 (no positive samples to learn from)
+                    # but keep RPN losses which are valid (learning to not propose boxes)
+                    loss_dict_clean = {}
+                    for loss_name, loss_value in loss_dict.items():
+                        if torch.isnan(loss_value):
+                            loss_dict_clean[loss_name] = torch.tensor(0.0, device=device)
+                        else:
+                            loss_dict_clean[loss_name] = loss_value
+                    loss_dict = loss_dict_clean
+                else:
+                    # For batches with at least some non-empty targets, NaN is an actual problem
+                    has_nan = False
+                    for loss_name, loss_value in loss_dict.items():
+                        if torch.isnan(loss_value) or torch.isinf(loss_value):
+                            logger.warning(f"NaN/Inf detected in validation {loss_name} at epoch {epoch+1}")
+                            has_nan = True
 
-                if has_nan:
-                    logger.warning("Skipping validation batch due to NaN/Inf in losses")
-                    model.eval()
-                    continue
+                    if has_nan:
+                        logger.warning("Skipping validation batch due to NaN/Inf in losses")
+                        model.eval()
+                        continue
 
                 losses = sum(loss for loss in loss_dict.values())
 
@@ -1171,6 +1023,7 @@ def train_faster_rcnn(
     checkpoint_path: str = None,
     config_path: str = 'configs/faster_rcnn_config.yaml',
     name: str = 'train',
+    no_augment: bool = False,
 ):
     """
     Train Faster R-CNN on CAMEL infrared dataset.
@@ -1182,6 +1035,7 @@ def train_faster_rcnn(
         checkpoint_path: Path to checkpoint to resume from
         config_path: Path to config YAML file
         name: Name for this training run (default: 'train')
+        no_augment: Disable augmentations for training (testing only). Default: False
     """
     # Load configuration
     config = load_config(config_path)
@@ -1225,6 +1079,8 @@ def train_faster_rcnn(
     logger.info(f"Config file: {config_path}")
     logger.info(f"Epochs: {epochs}")
     logger.info(f"Batch size: {batch_size}")
+    logger.info(f"Augmentations: {'DISABLED' if no_augment else 'ENABLED'}")
+    logger.info(f"Label format: Pascal VOC (corner format)")
 
     # Device
     device = torch.device(f"cuda:{config['model']['device']}" if torch.cuda.is_available() else "cpu")
@@ -1233,26 +1089,20 @@ def train_faster_rcnn(
     # Create datasets
     logger.info("Loading datasets...")
     data_dir = config['data']['dataset_path']
-
-    # Cache images in RAM for faster loading (optional, uses more memory)
-    cache_images = config['data'].get('cache_images', False)
-    if cache_images:
-        logger.info("Image caching enabled - loading all images into RAM...")
-
-    train_dataset = CAMELFasterRCNNDataset(
+    
+    # Use simplified Pascal format dataset (no conversion overhead)
+    logger.info("Using Pascal VOC format labels (corner coordinates)")
+    
+    train_dataset = CAMELDataset(
         root_dir=data_dir,
         split='train',
-        augment=True,
-        config=config,
-        cache_images=cache_images
+        augment=not no_augment,  # Disable augmentations if no_augment flag is set
     )
-
-    val_dataset = CAMELFasterRCNNDataset(
+    
+    val_dataset = CAMELDataset(
         root_dir=data_dir,
         split='val',
         augment=False,
-        config=config,
-        cache_images=cache_images
     )
 
     logger.info(f"Training samples: {len(train_dataset)}")
@@ -1599,6 +1449,7 @@ if __name__ == '__main__':
     parser.add_argument('--checkpoint', type=str, default=None, help='Path to checkpoint to resume from')
     parser.add_argument('--config', type=str, default='configs/faster_rcnn_config.yaml', help='Config file path')
     parser.add_argument('--name', type=str, default='train', help='Name for this training run (default: train)')
+    parser.add_argument('--no-augment', action='store_true', help='Disable augmentations (for testing only)')
 
     args = parser.parse_args()
 
@@ -1609,4 +1460,5 @@ if __name__ == '__main__':
         checkpoint_path=args.checkpoint,
         config_path=args.config,
         name=args.name,
+        no_augment=args.no_augment,
     )

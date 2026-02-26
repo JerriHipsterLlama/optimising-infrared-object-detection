@@ -32,8 +32,23 @@ class FasterRCNNAugmentations:
         """Build albumentations augmentation pipeline"""
         
         transforms = []
+
+        fill_value = 0.3  # A dark gray value in [0, 255] scale (Albumentations handles conversion for float32)
+
+        # 1. COLOR/BRIGHTNESS AUGMENTATIONS (approximating HSV adjustments)
+
+        # YOLOv8: hsv_s=0.7, hsv_v=0.4 (always applied)
+        # For grayscale infrared: use brightness/contrast to approximate HSV
         
-        # 1. GEOMETRIC AUGMENTATIONS
+        transforms.append(
+            A.RandomBrightnessContrast(
+                brightness_limit=self.config.get('brightness_limit', 0.4),
+                contrast_limit=self.config.get('contrast_limit', 0.4),
+                p=1.0  # Always apply (YOLOv8 behavior)
+            )
+        )
+
+        # 2. GEOMETRIC AUGMENTATIONS
         
         # Rotation + Translation + Scale combined
         # Defaults: degrees=15.0, translate=0.1, scale=0.5
@@ -44,8 +59,8 @@ class FasterRCNNAugmentations:
                 scale=(1.0 - self.config.get('scale_limit', 0.5), 1.0 + self.config.get('scale_limit', 0.5)),
                 rotate=(-int(self.config.get('degrees', 15.0)), int(self.config.get('degrees', 15.0))),
                 interpolation=cv2.INTER_LINEAR,
-                border_mode=cv2.BORDER_REFLECT_101,
-                fill=0,
+                border_mode=cv2.BORDER_CONSTANT,
+                fill=fill_value,  # Fill with a dark gray value to avoid pure black holes
                 p=1.0  # Always apply rotation (Similar to YOLOv8 behavior)
             )
         )
@@ -58,19 +73,15 @@ class FasterRCNNAugmentations:
                     p=self.config.get('horizontal_flip_p', 0.5)
                 )
             )
-
-        # 2. COLOR/BRIGHTNESS AUGMENTATIONS (approximating HSV adjustments)
-
-        # YOLOv8: hsv_s=0.7, hsv_v=0.4 (always applied)
-        # For grayscale infrared: use brightness/contrast to approximate HSV
         
-        transforms.append(
-            A.RandomBrightnessContrast(
-                brightness_limit=self.config.get('brightness_limit', 0.4),
-                contrast_limit=self.config.get('contrast_limit', 0.4),
-                p=1.0  # Always apply (YOLOv8 behavior)
+        # Vertical flip
+        # YOLOv8: flipud=0.0 (typically not used for natural images, but we can experiment)
+        if self.config.get('vertical_flip_p', 0.0) > 0:
+            transforms.append(
+                A.VerticalFlip(
+                    p=self.config.get('vertical_flip_p', 0.0)
+                )
             )
-        )
         
         # 3. CUTOUT/ERASING AUGMENTATION
         # YOLOv8: erasing=0.4
@@ -84,7 +95,7 @@ class FasterRCNNAugmentations:
                     num_holes_range=(1, max_holes),
                     hole_height_range=(max_h, max_h),  # Fixed size holes
                     hole_width_range=(max_w, max_w),   # Fixed size holes
-                    fill=0,
+                    fill=fill_value,  # Fill with a dark gray value to avoid pure black holes
                     fill_mask=None,
                     p=self.config.get('cutout_p', 0.4)
                 )
@@ -100,21 +111,21 @@ class FasterRCNNAugmentations:
         return A.Compose(
             transforms,
             bbox_params=A.BboxParams(
-                format='yolo',  # (x_center, y_center, width, height) normalized [0, 1]
+                format='pascal_voc',  # (x_min, y_min, x_max, y_max) in pixels
                 label_fields=['class_labels'],
                 min_visibility=0.2,  # Keep boxes with at least 20% visibility
-                min_area=0.001,  # Minimum bbox area (1% of image)
+                min_area=16.0,  # Minimum bbox area in pixels (e.g., 4x4 pixels)
                 clip=True,  # Clip bboxes to image boundaries
             )
         )
     
     def __call__(self, image: np.ndarray, bboxes: list, class_ids: list) -> Tuple[np.ndarray, list, list]:
         """
-        Apply augmentations to image and bounding boxes. Match __call__ signature convention of PyTorch
+        Apply augmentations to image and bounding boxes.
         
         Args:
             image (np.ndarray): Input image, shape (H, W) or (H, W, C), values in [0, 1]
-            bboxes (list): List of bounding boxes in YOLO format (x_center, y_center, width, height) normalized
+            bboxes (list): List of bounding boxes in Pascal VOC format (x_min, y_min, x_max, y_max) in pixels
             class_ids (list): List of class IDs for each bbox
         
         Returns:
@@ -134,15 +145,14 @@ class FasterRCNNAugmentations:
         
         image = np.clip(image, 0.0, 1.0)
         
-        # Quick validation to catch any edge cases
-        # (main validation happens in CAMELFasterRCNNDataset.__getitem__)
+        # Validate bounding boxes (Pascal VOC format: x_min, y_min, x_max, y_max)
         valid_bboxes = []
         valid_class_ids = []
         for bbox, cls_id in zip(bboxes, class_ids):
             if len(bbox) == 4:
-                x_center, y_center, width, height = bbox
+                x_min, y_min, x_max, y_max = bbox
                 # Basic sanity check
-                if width > 0 and height > 0:
+                if x_max > x_min and y_max > y_min:
                     valid_bboxes.append(bbox)
                     valid_class_ids.append(cls_id)
         

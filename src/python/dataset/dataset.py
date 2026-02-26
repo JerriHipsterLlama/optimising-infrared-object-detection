@@ -1,8 +1,11 @@
 """
 CAMEL Dataset loader for infrared object detection.
 
-Loads 336x256 grayscale infrared images and their corresponding YOLO format labels.
+Loads 336x256 grayscale infrared images and their corresponding Pascal VOC format labels.
 Supports train/val/test splits.
+
+This version loads labels directly in corner format (x1, y1, x2, y2) from 
+labels_pascal directory, eliminating conversion overhead and potential sources of error.
 """
 
 import os
@@ -17,23 +20,20 @@ from .transforms import ImageTransforms, InferenceTransforms
 
 class CAMELDataset(Dataset):
     """
-    PyTorch Dataset for CAMEL infrared imagery.
+    PyTorch Dataset for CAMEL infrared imagery with Pascal VOC format labels.
     
     Dataset structure:
-    - data/camel/images/train/Seq##_*.png  (infrared images, 336x256)
-    - data/camel/labels/train/Seq##.txt    (YOLO format labels per sequence)
+    - data/camel/images/train/Seq##_*.png      (infrared images, 336x256)
+    - data/camel/labels_pascal/train/Seq##_*.txt  (Pascal VOC format labels)
     
-    YOLO label format per line: <class_id> <x_center> <y_center> <width> <height>
-    All coordinates are normalized to [0, 1] relative to image dimensions.
+    Pascal VOC label format per line: <class_id> <x1> <y1> <x2> <y2>
+    Coordinates are in pixels (corner format) - no conversion needed!
     
     Args:
         root_dir (str): Path to data/camel directory
         split (str): 'train', 'val', or 'test'. Default: 'train'
         augment (bool): Apply augmentations (only for training). Default: True
         normalize (bool): Normalize pixel values. Default: True
-        box_format (str): 'yolo' or 'corner'. Default: 'yolo'
-            - 'yolo': (x_center, y_center, width, height) normalized [0, 1]
-            - 'corner': (x1, y1, x2, y2) in pixels for Faster R-CNN
     """
     
     def __init__(
@@ -42,70 +42,43 @@ class CAMELDataset(Dataset):
         split: str = "train",
         augment: bool = True,
         normalize: bool = True,
-        box_format: str = "yolo",
     ):
-        """Initialize CAMEL dataset."""
+        """Initialize CAMEL dataset with Pascal VOC format labels."""
         self.root_dir = Path(root_dir)
         self.split = split
-        self.box_format = box_format.lower()
-        
-        if self.box_format not in ["yolo", "corner"]:
-            raise ValueError(f"box_format must be 'yolo' or 'corner', got {self.box_format}")
         
         self.images_dir = self.root_dir / "images" / split
-        self.labels_dir = self.root_dir / "labels" / split
+        self.labels_dir = self.root_dir / "labels_pascal" / split
         
         # Verify directories exist
         if not self.images_dir.exists():
             raise FileNotFoundError(f"Images directory not found: {self.images_dir}")
         if not self.labels_dir.exists():
-            raise FileNotFoundError(f"Labels directory not found: {self.labels_dir}")
+            raise FileNotFoundError(
+                f"Labels directory not found: {self.labels_dir}\n"
+                f"Run: python tools/convert_labels_to_pascal_format.py --split {split}"
+            )
         
-        # Image properties
+        # Image properties (CAMEL infrared standard size)
         self.image_height = 256
         self.image_width = 336
         
-        # Load image paths (support both PNG and JPG formats)
-        self.image_files = sorted(self.images_dir.glob("*.png"))
-        self.image_files.extend(sorted(self.images_dir.rglob("*.jpg")))
-        self.image_files.extend(sorted(self.images_dir.rglob("*.jpeg")))
-        self.image_files = sorted(set(self.image_files))  # Remove duplicates and sort
+        # Load image paths (support multiple formats)
+        self.image_files = []
+        for ext in ['*.png', '*.jpg', '*.jpeg', '*.npy']:
+            self.image_files.extend(sorted(self.images_dir.glob(f"Seq*{ext}")))
+        self.image_files = sorted(set(self.image_files))  # Remove duplicates
         
         if len(self.image_files) == 0:
-            raise ValueError(f"No image files (PNG/JPG) found in {self.images_dir}")
+            raise ValueError(f"No image files found in {self.images_dir}")
         
-        # Load label files (one per sequence)
-        self.label_files = sorted(self.labels_dir.glob("*.txt"))
-        self._build_image_to_label_mapping()
+        print(f"Loaded {len(self.image_files)} images from {split} split (Pascal VOC format)")
         
         # Set up transforms
-        # Note: Augmentation is delegated to Ultralytics YOLOv8 training pipeline
-        # ImageTransforms only handles normalization
-        if split == "train":
+        if split == "train" and augment:
             self.transforms = ImageTransforms(normalize=normalize)
         else:
             self.transforms = InferenceTransforms(normalize=normalize)
-    
-    def _build_image_to_label_mapping(self):
-        """
-        Build a mapping from image files to their corresponding label files.
-        
-        Labels are stored per-image (Seq##_######.txt), matching the image filename.
-        
-        Example:
-            Image: Seq01_000001.png → Label: Seq01_000001.txt
-            Image: Seq05_000042.png → Label: Seq05_000042.txt
-        """
-        self.image_to_labels = {}
-        
-        for img_file in self.image_files:
-            # Label file has same name as image file but with .txt extension
-            label_file = self.labels_dir / f"{img_file.stem}.txt"
-            
-            if label_file.exists():
-                self.image_to_labels[str(img_file)] = str(label_file)
-            else:
-                print(f"Warning: Label file not found for {img_file}")
     
     def __len__(self) -> int:
         """Return the total number of images in the dataset."""
@@ -122,7 +95,7 @@ class CAMELDataset(Dataset):
             Tuple of:
                 - image (torch.Tensor): Shape (1, 256, 336), normalized to [0, 1]
                 - targets (Dict): Dictionary containing:
-                    - 'boxes': torch.Tensor of shape (N, 4), YOLO format
+                    - 'boxes': torch.Tensor of shape (N, 4) in corner format (x1, y1, x2, y2)
                     - 'class_ids': torch.Tensor of shape (N,)
                     - 'image_path': str, path to image file
         """
@@ -134,7 +107,7 @@ class CAMELDataset(Dataset):
         # Apply transformations
         image = self.transforms(image)
         
-        # Load labels
+        # Load labels (already in corner format - no conversion!)
         targets = self._load_labels(img_path)
         
         return image, targets
@@ -149,25 +122,35 @@ class CAMELDataset(Dataset):
         Returns:
             np.ndarray: Image array, shape (H, W), pixel values as original
         """
-        image = cv2.imread(str(img_path), cv2.IMREAD_GRAYSCALE)
+        if img_path.suffix == '.npy':
+            # Load numpy array directly
+            image = np.load(img_path)
+        else:
+            # Load image file
+            image = cv2.imread(str(img_path), cv2.IMREAD_GRAYSCALE)
         
         if image is None:
             raise ValueError(f"Failed to load image: {img_path}")
+        
+        # Normalize to [0, 1] if needed
+        if image.max() > 1.0:
+            image = image.astype(np.float32) / 255.0
         
         return image
     
     def _load_labels(self, img_path: Path) -> Dict:
         """
-        Load YOLO format labels for the image and convert to requested format.
+        Load Pascal VOC format labels for the image.
+        
+        Format: class_id x1 y1 x2 y2 (corner coordinates in pixels)
+        No conversion needed - labels are already in the correct format!
         
         Args:
             img_path (Path): Path to image file
         
         Returns:
             Dict containing:
-                - 'boxes': torch.Tensor of shape (N, 4)
-                    * if box_format='yolo': (x_center, y_center, width, height) normalized [0,1]
-                    * if box_format='corner': (x1, y1, x2, y2) in pixels
+                - 'boxes': torch.Tensor of shape (N, 4) - corner format (x1, y1, x2, y2)
                 - 'class_ids': torch.Tensor of shape (N,)
                 - 'image_path': str
         """
@@ -186,32 +169,27 @@ class CAMELDataset(Dataset):
                     
                     parts = line.split()
                     if len(parts) >= 5:
-                        # YOLO format: <class_id> <x_center> <y_center> <width> <height>
-                        class_id = int(parts[0])
-                        x_center = float(parts[1])
-                        y_center = float(parts[2])
-                        width = float(parts[3])
-                        height = float(parts[4])
-                        
-                        if self.box_format == "yolo":
-                            # Keep as YOLO format (normalized)
-                            boxes.append([x_center, y_center, width, height])
-                        elif self.box_format == "corner":
-                            # Convert to corner format (pixels): x1, y1, x2, y2
-                            # Corner format is used by Faster R-CNN
-                            x1 = (x_center - width / 2) * self.image_width
-                            y1 = (y_center - height / 2) * self.image_height
-                            x2 = (x_center + width / 2) * self.image_width
-                            y2 = (y_center + height / 2) * self.image_height
-                            boxes.append([x1, y1, x2, y2])
-                        
-                        class_ids.append(class_id)
+                        try:
+                            # Pascal VOC format: <class_id> <x1> <y1> <x2> <y2>
+                            class_id = int(parts[0])
+                            x1 = float(parts[1])
+                            y1 = float(parts[2])
+                            x2 = float(parts[3])
+                            y2 = float(parts[4])
+                            
+                            # Validate box (ensure x2 > x1 and y2 > y1)
+                            if x2 > x1 and y2 > y1:
+                                boxes.append([x1, y1, x2, y2])
+                                class_ids.append(class_id)
+                        except (ValueError, IndexError):
+                            continue
         
         # Convert to tensors
         if boxes:
             boxes = torch.tensor(boxes, dtype=torch.float32)
             class_ids = torch.tensor(class_ids, dtype=torch.long)
         else:
+            # Empty tensors for images with no objects (background class)
             boxes = torch.zeros((0, 4), dtype=torch.float32)
             class_ids = torch.zeros((0,), dtype=torch.long)
         
@@ -234,15 +212,21 @@ class CAMELDataset(Dataset):
             Dict with image path, size, and label info
         """
         img_path = self.image_files[idx]
-        seq_name = img_path.stem.split("_")[0]
-        label_file = self.labels_dir / f"{seq_name}.txt"
+        label_file = self.labels_dir / f"{img_path.stem}.txt"
+        
+        # Count objects in label file
+        num_objects = 0
+        if label_file.exists():
+            with open(label_file, 'r') as f:
+                num_objects = sum(1 for line in f if line.strip())
         
         info = {
             'index': idx,
             'image_path': str(img_path),
-            'sequence': seq_name,
+            'sequence': img_path.stem.split("_")[0],
             'image_size': (self.image_height, self.image_width),
             'has_labels': label_file.exists(),
+            'num_objects': num_objects,
         }
         
         return info
@@ -253,19 +237,15 @@ def create_dataloaders(
     batch_size: int = 32,
     num_workers: int = 4,
     augment: bool = True,
-    box_format: str = "yolo",
 ) -> Tuple[torch.utils.data.DataLoader, torch.utils.data.DataLoader]:
     """
-    Create train and validation dataloaders.
+    Create train and validation dataloaders with Pascal VOC format labels.
     
     Args:
         data_dir (str): Path to data/camel directory
         batch_size (int): Batch size. Default: 32
         num_workers (int): Number of data loading workers. Default: 4
         augment (bool): Enable augmentation for training. Default: True
-        box_format (str): 'yolo' or 'corner'. Default: 'yolo'
-            - 'yolo': (x_center, y_center, width, height) normalized [0,1]
-            - 'corner': (x1, y1, x2, y2) in pixels for Faster R-CNN
     
     Returns:
         Tuple of (train_loader, val_loader)
@@ -275,7 +255,6 @@ def create_dataloaders(
         root_dir=data_dir,
         split='train',
         augment=augment,
-        box_format=box_format,
     )
     
     # Validation dataset without augmentation
@@ -283,7 +262,6 @@ def create_dataloaders(
         root_dir=data_dir,
         split='val',
         augment=False,
-        box_format=box_format,
     )
     
     # Create dataloaders
