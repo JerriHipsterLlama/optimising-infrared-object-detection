@@ -57,7 +57,7 @@ augmentation:
   flipud: 0.0     # Vertical flip probability (0% - disabled for thermal)
   
   # Occlusion/Cutout
-  erasing: 0.4    # Cutout probability (40%)
+  erasing: 0    # Cutout probability (40%)
   
   # Batch augmentation (applied at batch level in YOLOv8)
   mosaic: 1.0     # Mosaic augmentation mixing ratio

@@ -70,16 +70,17 @@ augmentation:
   translation_limit: 0.1  # ±10% shift
   
   # Scale: corresponds to YOLOv8 scale=0.5 (always applied with random magnitude, range: 0.5x to 1.5x)
-  scale_limit: 0.5  # Range: 0.5 to 1.5
+  #! Adjusted
+  scale_limit: 0.3  # Range: 0.3 to 1.3
   
   # Brightness/Contrast: corresponds to HSV adjustments (always applied in YOLOv8)
   # hsv_s: 0.7 (saturation) → contrast adjustment
   # hsv_v: 0.0 (value) → brightness adjustment
-  brightness_limit: 0.4  # ±40% brightness (from hsv_v)
+  brightness_limit: 0.3  # ±40% brightness (from hsv_v)
   contrast_limit: 0.0    # ±0% contrast (from hsv_s)
   
   # Erasing/Cutout: corresponds to YOLOv8 erasing=0.4
-  cutout_enabled: true
+  cutout_enabled: false
   cutout_max_holes: 4
   cutout_max_height: 20
   cutout_max_width: 20
@@ -103,7 +104,7 @@ logging:
   log_interval: 50  # Log metrics every N batches (increased from 10 for better performance)
   save_metrics: true
   metrics_file: "logs/faster_rcnn_metrics.json"
-  tensorboard: false  # Use tensorboard logging
+  tensorboard: true  # Use tensorboard logging
 
 validation:
   val_interval: 5  # Validate every N epochs

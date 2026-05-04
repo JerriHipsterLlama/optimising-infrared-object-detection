@@ -33,7 +33,7 @@ class FasterRCNNAugmentations:
         
         transforms = []
 
-        fill_value = 0.3  # A dark gray value in [0, 255] scale (Albumentations handles conversion for float32)
+        fill_value = 0.4  # A dark gray value in [0, 255] scale (Albumentations handles conversion for float32)
 
         # 1. COLOR/BRIGHTNESS AUGMENTATIONS (approximating HSV adjustments)
 
@@ -51,7 +51,7 @@ class FasterRCNNAugmentations:
         # 2. GEOMETRIC AUGMENTATIONS
         
         # Rotation + Translation + Scale combined
-        # Defaults: degrees=15.0, translate=0.1, scale=0.5
+        # Defaults: degrees=15.0, translate=0.1, scale=0.5-
         transforms.append(
             A.Affine(
                 translate_percent={'x': (-self.config.get('translation_limit', 0.1), self.config.get('translation_limit', 0.1)),
