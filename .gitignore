@@ -2,3 +2,6 @@
 data/**
 data/*.txt
 build/**
+**/__pycache__/**
+models/checkpoints/**
+models/teacher/**
