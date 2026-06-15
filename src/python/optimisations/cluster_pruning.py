@@ -18,10 +18,12 @@ introducing more aggressive structural channel removal.
 from __future__ import annotations
 
 import argparse
+import csv
+import math
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, Iterable, List, Sequence, Set, Tuple
+from typing import Dict, Iterable, List, Optional, Sequence, Set, Tuple
 
 import numpy as np
 import onnx
@@ -31,6 +33,7 @@ import subprocess
 import time
 import os
 import onnxruntime as ort
+import psutil
 
 
 DEFAULT_PROTECTED_KEYWORDS: Tuple[str, ...] = (
@@ -68,7 +71,7 @@ class ClusterPruningConfig:
 	output_path: Path
 	prune_ratio: float = 0.2
 	cluster_size: int = 4
-	importance_method: str = "centroid"  # one of: 'centroid', 'weights', 'validation'
+	importance_method: str = "centroid"  # one of: 'centroid', 'weights', 'minimum_weight', 'validation'
 	protected_node_names: Set[str] = field(default_factory=set)
 	protected_output_names: Set[str] = field(default_factory=set)
 	protected_op_types: Set[str] = field(default_factory=lambda: set(DEFAULT_PROTECTED_OP_TYPES))
@@ -79,6 +82,11 @@ class ClusterPruningConfig:
 	iterations: int = 1
 	prune_decay: float = 1.0
 	finetune_command: str | None = None
+	profiling_mode: bool = False
+	hardware_target: str = "jetson_orin_nano"  # hardware target for profiling
+	csv_output_path: Path | None = None
+	use_cuda: bool = False
+	auto_cluster_size: bool = False  # automatically determine cluster size using LCM
 
 
 @dataclass(slots=True)
@@ -93,6 +101,9 @@ class PruningReport:
 	channels_zeroed: int
 	modified_nodes: List[str]
 	protected_nodes: List[str]
+	iteration: int = 0
+	profiling_metrics: Dict[str, float] = field(default_factory=dict)
+	layer_metrics: List[Dict[str, any]] = field(default_factory=list)
 
 
 def load_model(model_path: Path) -> onnx.ModelProto:
@@ -204,6 +215,202 @@ def weight_filter_scores(weights: np.ndarray) -> np.ndarray:
 	return np.sqrt(np.sum(squared, axis=axes))
 
 
+def minimum_weight_filter_scores(weights: np.ndarray) -> np.ndarray:
+	"""Score each output filter by Minimum Weight criterion.
+	
+	For each filter, calculate the average of the squared weights of its kernels.
+	This criterion ranks filters by the magnitude of their learned parameters.
+	Lower scores indicate less important filters that can be pruned.
+	"""
+
+	if weights.ndim < 2:
+		raise ValueError(f"Conv weight tensor must have at least 2 dimensions, got {weights.shape}")
+
+	axes = tuple(range(1, weights.ndim))
+	squared = np.square(weights, dtype=np.float32)
+	return np.mean(squared, axis=axes)
+
+
+def calculate_lcm_cluster_size(layer_out_channels: int, hardware_width: int = 32) -> int:
+	"""Determine optimal cluster size using LCM (Least Common Multiple).
+	
+	This aligns cluster size with hardware execution units for efficient computation.
+	
+	Args:
+		layer_out_channels: Number of output channels in the layer
+		hardware_width: Hardware execution width (default 32 for typical GPUs)
+	
+	Returns:
+		Optimal cluster size aligned with hardware constraints
+	"""
+
+	def gcd(a: int, b: int) -> int:
+		"""Calculate Greatest Common Divisor."""
+		while b:
+			a, b = b, a % b
+		return a
+
+	def lcm(a: int, b: int) -> int:
+		"""Calculate Least Common Multiple."""
+		return abs(a * b) // gcd(a, b)
+
+	# Start with reasonable cluster sizes and find the best alignment
+	candidate_sizes = [1, 2, 4, 8, 16, 32]
+	best_size = 4  # default fallback
+	best_alignment = 0
+
+	for size in candidate_sizes:
+		if size > layer_out_channels:
+			continue
+		alignment = lcm(size, hardware_width)
+		if alignment <= layer_out_channels and alignment > best_alignment:
+			best_size = size
+			best_alignment = alignment
+
+	return best_size
+
+
+def get_hardware_specs(hardware_target: str = "jetson_orin_nano") -> Dict[str, any]:
+	"""Get hardware specifications for the target device.
+	
+	Args:
+		hardware_target: Target hardware platform (jetson_orin_nano, rtx_3070, cpu)
+	
+	Returns:
+		Dictionary with hardware specifications
+	"""
+
+	hardware_specs = {
+		"jetson_orin_nano": {
+			"name": "NVIDIA Jetson Orin Nano",
+			"compute_capability": "8.7",
+			"cores": 128,
+			"memory_gb": 8,
+			"execution_width": 32,
+			"tensor_cores": True,
+			"cuda_enabled": True,
+		},
+		"rtx_3070": {
+			"name": "NVIDIA GeForce RTX 3070",
+			"compute_capability": "8.6",
+			"cores": 5888,
+			"memory_gb": 8,
+			"execution_width": 64,
+			"tensor_cores": True,
+			"cuda_enabled": True,
+		},
+		"cpu": {
+			"name": "CPU",
+			"cores": psutil.cpu_count(),
+			"memory_gb": psutil.virtual_memory().total / (1024**3),
+			"execution_width": 64,
+			"tensor_cores": False,
+			"cuda_enabled": False,
+		}
+	}
+
+	return hardware_specs.get(hardware_target.lower(), hardware_specs["cpu"])
+
+
+def profile_hardware(model_path: Path, hardware_target: str = "jetson_orin_nano", 
+                   warmup: int = 5, runs: int = 50) -> Dict[str, float]:
+	"""Profile hardware performance metrics.
+	
+	Measures inference latency, memory usage, and model size on target hardware.
+	
+	Args:
+		model_path: Path to ONNX model
+		hardware_target: Target hardware platform
+		warmup: Number of warmup iterations
+		runs: Number of benchmark runs
+	
+	Returns:
+		Dictionary with profiling metrics
+	"""
+
+	metrics = {
+		"model_size_bytes": float(os.path.getsize(model_path)),
+		"median_latency_ms": 0.0,
+		"mean_latency_ms": 0.0,
+		"std_latency_ms": 0.0,
+		"memory_usage_mb": 0.0,
+		"hardware_target": hardware_target,
+	}
+
+	try:
+		# Determine execution provider based on hardware target
+		providers = ["CPUExecutionProvider"]
+		if hardware_target.lower() in ("jetson_orin_nano", "rtx_3070"):
+			providers = ["CUDAExecutionProvider", "CPUExecutionProvider"]
+
+		sess = ort.InferenceSession(str(model_path), providers=providers)
+		
+		# Record which provider was actually used
+		actual_provider = sess.get_providers()[0] if sess.get_providers() else "CPUExecutionProvider"
+		metrics["execution_provider"] = actual_provider
+		
+		input_meta = sess.get_inputs()[0]
+		input_shape = [dim if isinstance(dim, int) else 1 for dim in input_meta.shape]
+		dummy = np.random.randn(*input_shape).astype(np.float32)
+
+		# Warmup runs
+		for _ in range(warmup):
+			sess.run(None, {input_meta.name: dummy})
+
+		# Measure latency
+		times = []
+		for _ in range(runs):
+			t0 = time.perf_counter()
+			sess.run(None, {input_meta.name: dummy})
+			t1 = time.perf_counter()
+			times.append((t1 - t0) * 1000.0)
+
+		times_arr = np.array(times)
+		metrics["median_latency_ms"] = float(np.median(times_arr))
+		metrics["mean_latency_ms"] = float(np.mean(times_arr))
+		metrics["std_latency_ms"] = float(np.std(times_arr))
+
+		# Measure memory usage
+		process = psutil.Process(os.getpid())
+		mem_info = process.memory_info()
+		metrics["memory_usage_mb"] = mem_info.rss / (1024 * 1024)
+
+	except Exception as e:
+		print(f"Warning: Hardware profiling failed: {e}")
+		metrics["execution_provider"] = "FAILED"
+
+	return metrics
+
+
+def export_metrics_to_csv(metrics_list: List[Dict[str, any]], csv_path: Path) -> None:
+	"""Export pruning metrics to CSV file.
+	
+	Args:
+		metrics_list: List of metric dictionaries from pruning runs
+		csv_path: Output CSV file path
+	"""
+
+	if not metrics_list:
+		return
+
+	csv_path.parent.mkdir(parents=True, exist_ok=True)
+
+	# Get all unique keys from all metrics dicts
+	fieldnames = set()
+	for metrics in metrics_list:
+		fieldnames.update(metrics.keys())
+
+	fieldnames = sorted(list(fieldnames))
+
+	try:
+		with open(csv_path, 'w', newline='') as csvfile:
+			writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
+			writer.writeheader()
+			writer.writerows(metrics_list)
+	except Exception as e:
+		print(f"Warning: Failed to write metrics to CSV: {e}")
+
+
 def cluster_scores(scores: np.ndarray, cluster_size: int) -> List[Tuple[np.ndarray, float]]:
 	"""Group filter scores into contiguous clusters and compute cluster scores."""
 
@@ -230,6 +437,11 @@ def select_channels_to_zero(
 	This groups similar filters with KMeans, computes cluster scores as the
 	mean L2 score of cluster members, then selects lowest-scoring clusters
 	until the target number of channels to prune is reached.
+	
+	Supports multiple importance methods:
+	- 'centroid': Use centroid vector norms as cluster importance
+	- 'weights': Use mean filter L2 magnitude
+	- 'minimum_weight': Use mean of squared weights per filter
 	"""
 
 	if prune_ratio <= 0:
@@ -259,8 +471,11 @@ def select_channels_to_zero(
 	kmeans = KMeans(n_clusters=n_clusters, random_state=0, n_init="auto")
 	labels = kmeans.fit_predict(flattened)
 
-	# Score each filter by L2 magnitude
-	filter_scores = weight_filter_scores(weights)
+	# Score filters based on importance method
+	if importance_method == "minimum_weight":
+		filter_scores = minimum_weight_filter_scores(weights)
+	else:
+		filter_scores = weight_filter_scores(weights)
 
 	# Compute cluster scores
 	clusters: List[Tuple[np.ndarray, float]] = []
@@ -275,7 +490,7 @@ def select_channels_to_zero(
 			cluster_score = float(center_norms[c])
 			clusters.append((members, cluster_score))
 	else:
-		# fallback to mean filter L2 in cluster
+		# fallback to mean filter score in cluster
 		for c in range(n_clusters):
 			members = np.where(labels == c)[0]
 			if members.size == 0:
@@ -338,6 +553,7 @@ def prune_model(model: onnx.ModelProto, config: ClusterPruningConfig) -> Pruning
 	protected_model_indices = infer_protected_model_indices(model)
 	modified_nodes: List[str] = []
 	protected_nodes: List[str] = []
+	layer_metrics: List[Dict[str, any]] = []
 
 	total_conv_nodes = 0
 	protected_conv_nodes = 0
@@ -363,16 +579,31 @@ def prune_model(model: onnx.ModelProto, config: ClusterPruningConfig) -> Pruning
 		if weights is None:
 			continue
 
+		# Determine cluster size
+		cluster_size = config.cluster_size
+		if config.auto_cluster_size and weights.ndim == 4:
+			cluster_size = calculate_lcm_cluster_size(weights.shape[0])
+
 		channels_to_zero = select_channels_to_zero(
 			weights=weights,
 			prune_ratio=config.prune_ratio,
-			cluster_size=config.cluster_size,
+			cluster_size=cluster_size,
 			min_channels_to_keep=config.min_channels_to_keep,
 			importance_method=getattr(config, "importance_method", "centroid"),
 		)
 
 		if channels_to_zero.size == 0:
 			continue
+
+		# Record metrics for this layer
+		layer_metric = {
+			"node_name": node.name or node.output[0] if node.output else weight_name,
+			"weight_shape": str(weights.shape),
+			"channels_pruned": int(channels_to_zero.size),
+			"cluster_size": cluster_size,
+			"importance_method": config.importance_method,
+		}
+		layer_metrics.append(layer_metric)
 
 		updated_weights = zero_conv_filters(weights, channels_to_zero)
 		update_initializer_tensor(model, initializer_map, weight_name, updated_weights)
@@ -389,11 +620,20 @@ def prune_model(model: onnx.ModelProto, config: ClusterPruningConfig) -> Pruning
 		channels_zeroed += int(channels_to_zero.size)
 		modified_nodes.append(node.name or node.output[0] if node.output else weight_name)
 
+	# Profile if enabled
+	profiling_metrics: Dict[str, float] = {}
+	if config.profiling_mode and not config.dry_run:
+		if not config.dry_run:
+			model = onnx.shape_inference.infer_shapes(model)
+			save_model(model, config.output_path)
+		profiling_metrics = profile_hardware(config.output_path, config.hardware_target)
+
 	if not config.dry_run:
-		model = onnx.shape_inference.infer_shapes(model)
+		if not config.profiling_mode:
+			model = onnx.shape_inference.infer_shapes(model)
 		save_model(model, config.output_path)
 
-	return PruningReport(
+	report = PruningReport(
 		source_model=config.onnx_path,
 		output_model=config.output_path,
 		total_conv_nodes=total_conv_nodes,
@@ -402,7 +642,25 @@ def prune_model(model: onnx.ModelProto, config: ClusterPruningConfig) -> Pruning
 		channels_zeroed=channels_zeroed,
 		modified_nodes=modified_nodes,
 		protected_nodes=protected_nodes,
+		profiling_metrics=profiling_metrics,
+		layer_metrics=layer_metrics,
 	)
+
+	# Export metrics to CSV if configured
+	if config.csv_output_path:
+		csv_rows = []
+		for metric in layer_metrics:
+			row = {
+				"iteration": 1,
+				"hardware_target": config.hardware_target,
+				**metric,
+				**profiling_metrics,
+			}
+			csv_rows.append(row)
+		if csv_rows:
+			export_metrics_to_csv(csv_rows, config.csv_output_path)
+
+	return report
 
 
 def find_consumers(model: onnx.ModelProto, tensor_name: str) -> List[onnx.NodeProto]:
@@ -428,6 +686,7 @@ def structural_prune_model(model: onnx.ModelProto, config: ClusterPruningConfig)
 	protected_model_indices = infer_protected_model_indices(model)
 	modified_nodes: List[str] = []
 	protected_nodes: List[str] = []
+	layer_metrics: List[Dict[str, any]] = []
 
 	total_conv_nodes = 0
 	protected_conv_nodes = 0
@@ -453,17 +712,32 @@ def structural_prune_model(model: onnx.ModelProto, config: ClusterPruningConfig)
 		if weights is None or weights.ndim != 4:
 			continue
 
+		# Determine cluster size
+		cluster_size = config.cluster_size
+		if config.auto_cluster_size:
+			cluster_size = calculate_lcm_cluster_size(weights.shape[0])
+
 		# Determine channels to remove using same selection logic
 		channels_to_remove = select_channels_to_zero(
 			weights=weights,
 			prune_ratio=config.prune_ratio,
-			cluster_size=config.cluster_size,
+			cluster_size=cluster_size,
 			min_channels_to_keep=config.min_channels_to_keep,
 			importance_method=getattr(config, "importance_method", "centroid"),
 		)
 
 		if channels_to_remove.size == 0:
 			continue
+
+		# Record metrics for this layer
+		layer_metric = {
+			"node_name": node.name or (node.output[0] if node.output else weight_name),
+			"weight_shape": str(weights.shape),
+			"channels_removed": int(channels_to_remove.size),
+			"cluster_size": cluster_size,
+			"importance_method": config.importance_method,
+		}
+		layer_metrics.append(layer_metric)
 
 		# Find consumers of this conv's output
 		output_tensor = node.output[0] if node.output else None
@@ -533,12 +807,20 @@ def structural_prune_model(model: onnx.ModelProto, config: ClusterPruningConfig)
 		channels_removed += int(channels_to_remove.size)
 		modified_nodes.append(node.name or (node.output[0] if node.output else weight_name))
 
+	# Profile if enabled
+	profiling_metrics: Dict[str, float] = {}
+	if config.profiling_mode and not config.dry_run:
+		model = onnx.shape_inference.infer_shapes(model)
+		save_model(model, config.output_path)
+		profiling_metrics = profile_hardware(config.output_path, config.hardware_target)
+
 	# finalize
-	model = onnx.shape_inference.infer_shapes(model)
+	if not config.profiling_mode:
+		model = onnx.shape_inference.infer_shapes(model)
 	if not config.dry_run:
 		save_model(model, config.output_path)
 
-	return PruningReport(
+	report = PruningReport(
 		source_model=config.onnx_path,
 		output_model=config.output_path,
 		total_conv_nodes=total_conv_nodes,
@@ -547,7 +829,25 @@ def structural_prune_model(model: onnx.ModelProto, config: ClusterPruningConfig)
 		channels_zeroed=channels_removed,
 		modified_nodes=modified_nodes,
 		protected_nodes=protected_nodes,
+		profiling_metrics=profiling_metrics,
+		layer_metrics=layer_metrics,
 	)
+
+	# Export metrics to CSV if configured
+	if config.csv_output_path:
+		csv_rows = []
+		for metric in layer_metrics:
+			row = {
+				"iteration": 1,
+				"hardware_target": config.hardware_target,
+				**metric,
+				**profiling_metrics,
+			}
+			csv_rows.append(row)
+		if csv_rows:
+			export_metrics_to_csv(csv_rows, config.csv_output_path)
+
+	return report
 
 
 def iterative_prune_and_finetune(
@@ -558,6 +858,8 @@ def iterative_prune_and_finetune(
 	"""Run iterative prune -> optional finetune cycles according to config."""
 
 	working_path = Path(onnx_path)
+	all_metrics: List[Dict[str, any]] = []
+
 	for i in range(config.iterations):
 		print(f"Iteration {i+1}/{config.iterations}: prune_ratio={config.prune_ratio}")
 		model = load_model(working_path)
@@ -567,6 +869,13 @@ def iterative_prune_and_finetune(
 			report = prune_model(model, config)
 
 		print(f"  Pruned nodes: {report.pruned_conv_nodes}, channels affected: {report.channels_zeroed}")
+
+		# Collect metrics from this iteration
+		for metric in report.layer_metrics:
+			metric_copy = metric.copy()
+			metric_copy["iteration"] = i + 1
+			metric_copy["hardware_target"] = config.hardware_target
+			all_metrics.append(metric_copy)
 
 		# update working path to the last output
 		working_path = report.output_model
@@ -580,6 +889,11 @@ def iterative_prune_and_finetune(
 
 		# decay prune ratio if requested
 		config.prune_ratio *= config.prune_decay
+
+	# Export all collected metrics to CSV if configured
+	if config.csv_output_path and all_metrics:
+		export_metrics_to_csv(all_metrics, config.csv_output_path)
+		print(f"Metrics exported to: {config.csv_output_path}")
 
 
 def benchmark_onnx(model_path: Path, warmup: int = 5, runs: int = 50) -> Dict[str, float]:
@@ -637,6 +951,8 @@ def build_config_from_args(args: argparse.Namespace) -> ClusterPruningConfig:
 		if keyword.strip()
 	) if args.protected_keywords else DEFAULT_PROTECTED_KEYWORDS
 
+	csv_path = Path(args.csv_output) if hasattr(args, 'csv_output') and args.csv_output else None
+
 	return ClusterPruningConfig(
 		onnx_path=Path(args.onnx_path),
 		output_path=Path(args.output_path),
@@ -649,6 +965,11 @@ def build_config_from_args(args: argparse.Namespace) -> ClusterPruningConfig:
 		min_channels_to_keep=args.min_channels_to_keep,
 		dry_run=args.dry_run,
 		structural=getattr(args, "structural", False),
+		importance_method=getattr(args, "importance_method", "centroid"),
+		profiling_mode=getattr(args, "profiling", False),
+		hardware_target=getattr(args, "hardware_target", "jetson_orin_nano"),
+		csv_output_path=csv_path,
+		auto_cluster_size=getattr(args, "auto_cluster_size", False),
 	)
 
 
@@ -674,6 +995,18 @@ def build_parser() -> argparse.ArgumentParser:
 		type=int,
 		default=4,
 		help="Number of consecutive filters per pruning cluster",
+	)
+	parser.add_argument(
+		"--auto-cluster-size",
+		action="store_true",
+		help="Automatically determine cluster size using LCM for hardware alignment",
+	)
+	parser.add_argument(
+		"--importance-method",
+		type=str,
+		default="centroid",
+		choices=["centroid", "weights", "minimum_weight"],
+		help="Method for ranking filter importance",
 	)
 	parser.add_argument(
 		"--protected-node-names",
@@ -715,6 +1048,24 @@ def build_parser() -> argparse.ArgumentParser:
 		action="store_true",
 		help="Calculate the pruning plan without writing an output model",
 	)
+	parser.add_argument(
+		"--profiling",
+		action="store_true",
+		help="Enable hardware profiling to measure performance metrics",
+	)
+	parser.add_argument(
+		"--hardware-target",
+		type=str,
+		default="jetson_orin_nano",
+		choices=["jetson_orin_nano", "rtx_3070", "cpu"],
+		help="Target hardware platform for profiling and optimization",
+	)
+	parser.add_argument(
+		"--csv-output",
+		type=str,
+		default=None,
+		help="Path to CSV file for exporting pruning metrics",
+	)
 	return parser
 
 
@@ -738,6 +1089,7 @@ def main() -> None:
 	print(f"  Protected Conv nodes: {report.protected_conv_nodes}")
 	print(f"  Pruned Conv nodes: {report.pruned_conv_nodes}")
 	print(f"  Channels zeroed: {report.channels_zeroed}")
+	
 	if report.modified_nodes:
 		print("  Modified nodes:")
 		for node_name in report.modified_nodes:
@@ -746,6 +1098,15 @@ def main() -> None:
 		print("  Protected nodes:")
 		for node_name in report.protected_nodes:
 			print(f"    - {node_name}")
+	
+	if config.profiling_mode and report.profiling_metrics:
+		print("  Hardware profiling metrics:")
+		for key, value in report.profiling_metrics.items():
+			print(f"    - {key}: {value}")
+	
+	if config.csv_output_path:
+		print(f"  Metrics exported to: {config.csv_output_path}")
+
 
 
 if __name__ == "__main__":
