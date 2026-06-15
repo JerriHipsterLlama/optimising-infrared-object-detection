@@ -274,7 +274,7 @@ def get_hardware_specs(hardware_target: str = "jetson_orin_nano") -> Dict[str, a
 	"""Get hardware specifications for the target device.
 	
 	Args:
-		hardware_target: Target hardware platform
+		hardware_target: Target hardware platform (jetson_orin_nano, rtx_3070, cpu)
 	
 	Returns:
 		Dictionary with hardware specifications
@@ -288,6 +288,16 @@ def get_hardware_specs(hardware_target: str = "jetson_orin_nano") -> Dict[str, a
 			"memory_gb": 8,
 			"execution_width": 32,
 			"tensor_cores": True,
+			"cuda_enabled": True,
+		},
+		"rtx_3070": {
+			"name": "NVIDIA GeForce RTX 3070",
+			"compute_capability": "8.6",
+			"cores": 5888,
+			"memory_gb": 8,
+			"execution_width": 64,
+			"tensor_cores": True,
+			"cuda_enabled": True,
 		},
 		"cpu": {
 			"name": "CPU",
@@ -295,6 +305,7 @@ def get_hardware_specs(hardware_target: str = "jetson_orin_nano") -> Dict[str, a
 			"memory_gb": psutil.virtual_memory().total / (1024**3),
 			"execution_width": 64,
 			"tensor_cores": False,
+			"cuda_enabled": False,
 		}
 	}
 
@@ -329,10 +340,15 @@ def profile_hardware(model_path: Path, hardware_target: str = "jetson_orin_nano"
 	try:
 		# Determine execution provider based on hardware target
 		providers = ["CPUExecutionProvider"]
-		if hardware_target.lower() == "jetson_orin_nano":
+		if hardware_target.lower() in ("jetson_orin_nano", "rtx_3070"):
 			providers = ["CUDAExecutionProvider", "CPUExecutionProvider"]
 
 		sess = ort.InferenceSession(str(model_path), providers=providers)
+		
+		# Record which provider was actually used
+		actual_provider = sess.get_providers()[0] if sess.get_providers() else "CPUExecutionProvider"
+		metrics["execution_provider"] = actual_provider
+		
 		input_meta = sess.get_inputs()[0]
 		input_shape = [dim if isinstance(dim, int) else 1 for dim in input_meta.shape]
 		dummy = np.random.randn(*input_shape).astype(np.float32)
@@ -361,6 +377,7 @@ def profile_hardware(model_path: Path, hardware_target: str = "jetson_orin_nano"
 
 	except Exception as e:
 		print(f"Warning: Hardware profiling failed: {e}")
+		metrics["execution_provider"] = "FAILED"
 
 	return metrics
 
@@ -1040,7 +1057,7 @@ def build_parser() -> argparse.ArgumentParser:
 		"--hardware-target",
 		type=str,
 		default="jetson_orin_nano",
-		choices=["jetson_orin_nano", "cpu"],
+		choices=["jetson_orin_nano", "rtx_3070", "cpu"],
 		help="Target hardware platform for profiling and optimization",
 	)
 	parser.add_argument(
