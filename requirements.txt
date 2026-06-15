@@ -16,6 +16,7 @@ albucore>=1.0.0
 # Configuration and Utilities
 PyYAML==6.0.3
 tqdm==4.67.1
+psutil==6.1.0
 
 # Visualization
 matplotlib==3.10.8
