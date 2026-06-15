@@ -3,18 +3,18 @@
 # Image size: 336x256, Grayscale
 
 model:
-  name: "yolov8n"
+  name: "yolov8l"
   pretrained: true
   img_size: 336  # Native CAMEL image width (336x256 aspect ratio)
   device: 0  # GPU device index (0 for single GPU)
 
 training:
   epochs: 200  # Increased from 100 to 200 for thermal data convergence (Ding et al., 2024)
-  batch_size: 16  # Auto batch size based on GPU memory (Ultralytics default)
+  batch_size: 32  # Auto batch size based on GPU memory (Ultralytics default)
   learning_rate: 0.01  # Increased from 0.001 to 0.01 for thermal detection (Ding et al., 2024)
   momentum: 0.937  # SGD momentum (standard YOLOv8 default)
   weight_decay: 0.0005  # L2 regularization (standard YOLOv8 default)
-  warmup_epochs: 3
+  warmup_epochs: 5
   optimizer: "SGD"
   patience: 30  # Early stopping patience
 
@@ -64,7 +64,7 @@ augmentation:
 
 checkpoint:
   save_interval: 5    # Save checkpoint every N epochs
-  resume_from: "models/checkpoints/yolov8"   # Path to checkpoint directory
+  resume_from: "models/baseline/yolov8"   # Path to checkpoint directory
   save_best: true     # Save best model
   save_last: true     # Save last model
 
@@ -83,7 +83,7 @@ validation:
 export:
   onnx: true
   onnx_opset: 14
-  onnx_path: "models/weights/yolov8n.onnx"
+  onnx_path: "models/weights/yolov8.onnx"
   
   tensorrt: false  # Requires CUDA
-  tensorrt_path: "models/weights/yolov8n.trt"
+  tensorrt_path: "models/weights/yolov8.trt"
