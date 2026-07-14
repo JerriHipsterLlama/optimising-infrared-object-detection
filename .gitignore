@@ -4,5 +4,4 @@ data/*.txt
 build/**
 /.venv/*
 **/__pycache__/**
-/models/checkpoints/**/train**
-/models/teacher/**
+/models/**
