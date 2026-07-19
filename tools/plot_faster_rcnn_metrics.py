@@ -6,13 +6,13 @@ Creates plots similar to Ultralytics YOLO output, including results.png.
 
 Usage:
     # From run directory
-    python tools/plot_faster_rcnn_metrics.py --run models/checkpoints/fasterrcnn/train
+    python tools/plot_faster_rcnn_metrics.py --run artifacts/checkpoints/faster_rcnn/train
 
     # From metrics file
-    python tools/plot_faster_rcnn_metrics.py --metrics models/checkpoints/fasterrcnn/train/metrics.json
+    python tools/plot_faster_rcnn_metrics.py --metrics artifacts/checkpoints/faster_rcnn/train/metrics.json
 
     # Save plots to custom location
-    python tools/plot_faster_rcnn_metrics.py --run models/checkpoints/fasterrcnn/train --output plots/
+    python tools/plot_faster_rcnn_metrics.py --run artifacts/checkpoints/faster_rcnn/train --output plots/
 """
 
 import argparse
@@ -178,7 +178,7 @@ def print_summary(metrics_file: str):
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Plot Faster R-CNN training metrics')
-    parser.add_argument('--run', type=str, default=None, help='Path to run directory (e.g., models/checkpoints/fasterrcnn/train)')
+    parser.add_argument('--run', type=str, default=None, help='Path to run directory (e.g., artifacts/checkpoints/faster_rcnn/train)')
     parser.add_argument('--metrics', type=str, default=None, help='Path to metrics.json file (legacy support)')
     parser.add_argument('--output', type=str, default=None, help='Directory to save plots (optional)')
     parser.add_argument('--show', action='store_true', help='Display plots interactively')

@@ -87,7 +87,7 @@ def train_yolov8(
 ) -> Path:
     """
     Train YOLOv8n on CAMEL infrared dataset.
-    
+
     Args:
         epochs (int): Number of epochs. If None, uses config value.
         batch_size (int): Batch size. If None, uses config value.
@@ -97,7 +97,7 @@ def train_yolov8(
     """
     config_path = str(resolve_dataset_yaml(config_path, REPO_ROOT)) if not Path(config_path).is_absolute() else config_path
     config = load_config(config_path)
-    
+
     # Override config with CLI args if provided
     epochs = config['training']['epochs'] if epochs is None else epochs
     batch_size = config['training']['batch_size'] if batch_size is None else batch_size
@@ -105,35 +105,35 @@ def train_yolov8(
     resolved_device = resolve_training_device(config['model']['device'] if device is None else device)
     resolved_seed = config.get('training', {}).get('seed', 7) if seed is None else seed
     seed_everything(int(resolved_seed))
-    
+
     # Setup absolute checkpoint directory to avoid runs/detect/ prefix
     checkpoint_dir = (Path(project).resolve() if project is not None else Path(config['checkpoint']['resume_from']).resolve())
-    
+
     # Dataset path
     dataset_yaml = resolve_dataset_yaml(
         data if data is not None else Path(config['data']['dataset_path']) / 'camel.yaml',
         REPO_ROOT,
     )
-    
+
     if not dataset_yaml.exists():
         raise FileNotFoundError(
             f"Dataset YAML not found: {dataset_yaml}\n"
             f"Make sure you have data/camel/camel.yaml configured"
         )
-    
+
     # Verify dataset integrity - count images and labels
     dataset_root = Path(config['data']['dataset_path'])
     train_images_dir = dataset_root / 'images' / 'train'
     train_labels_dir = dataset_root / 'labels' / 'train'
     val_images_dir = dataset_root / 'images' / 'val'
     val_labels_dir = dataset_root / 'labels' / 'val'
-    
+
     # Count files
     train_images_count = count_dataset_images(train_images_dir) if train_images_dir.exists() else 0
     train_labels = list(train_labels_dir.glob('*.txt')) if train_labels_dir.exists() else []
     val_images_count = count_dataset_images(val_images_dir) if val_images_dir.exists() else 0
     val_labels = list(val_labels_dir.glob('*.txt')) if val_labels_dir.exists() else []
-    
+
     print(f"\n{'='*60}")
     print(f"DATASET VERIFICATION")
     print(f"{'='*60}")
@@ -146,12 +146,12 @@ def train_yolov8(
     print(f"  Labels: {len(val_labels)}")
     print(f"  Match: {'✓' if val_images_count == len(val_labels) else '✗ MISMATCH!'}")
     print(f"{'='*60}\n")
-    
+
     if train_images_count != len(train_labels):
         print(f"WARNING: Training images ({train_images_count}) != labels ({len(train_labels)})")
     if val_images_count != len(val_labels):
         print(f"WARNING: Validation images ({val_images_count}) != labels ({len(val_labels)})")
-    
+
     print(f"Training YOLOv8n on infrared dataset...")
     print(f"  Config file: {config_path}")
     print(f"  Dataset: {dataset_yaml}")
@@ -167,7 +167,7 @@ def train_yolov8(
 
     # Initialize model only after dry-run validation has completed.
     model = YOLO(config['model']['name'])
-    
+
     # Train with settings from config
     results = model.train(
         data=str(dataset_yaml),
@@ -182,29 +182,29 @@ def train_yolov8(
         name=name,
         resume=resume,
         pretrained=config['model']['pretrained'],
-        
+
         # Thermal-optimized hyperparameters
         optimizer=config['training']['optimizer'],
         lr0=config['training']['learning_rate'],
         momentum=config['training']['momentum'],
         weight_decay=config['training']['weight_decay'],
         warmup_epochs=config['training']['warmup_epochs'],
-        
+
         # Augmentation
         degrees=config['augmentation']['degrees'],
-        
+
         # Data loading
         workers=config['training']['num_workers'],  # Windows compatibility
         close_mosaic=15,
-        
+
         verbose=True,
         compile=False,  # Disable compilation for better compatibility and debugging
         seed=int(resolved_seed),
     )
-    
+
     print(f"\nTraining completed!")
     print(f"  Results saved to: {checkpoint_dir}/{name}")
-    
+
     # Export to ONNX if configured
     if config['export']['onnx']:
         print(f"\nExporting to ONNX...")
@@ -228,35 +228,35 @@ Examples:
   python apps/train.py yolov8 --config configs/yolov8_config.yaml --epochs 100
         ''',
     )
-    
+
     parser.add_argument(
         '--config',
         type=str,
         default='configs/yolov8_config.yaml',
         help='Path to config YAML file (default: configs/yolov8_config.yaml)',
     )
-    
+
     parser.add_argument(
         '--epochs',
         type=int,
         default=None,
         help='Number of epochs (overrides config)',
     )
-    
+
     parser.add_argument(
         '--batch-size',
         type=int,
         default=None,
         help='Batch size (overrides config)',
     )
-    
+
     parser.add_argument(
         '--img-size',
         type=int,
         default=None,
         help='Image size (overrides config)',
     )
-    
+
     parser.add_argument(
         '--resume',
         action='store_true',
@@ -268,9 +268,9 @@ Examples:
     parser.add_argument('--project', default=None, help='Output project directory.')
     parser.add_argument('--name', default='train', help='Experiment run name.')
     parser.add_argument('--dry-run', action='store_true', help='Print resolved settings without training.')
-    
+
     args = parser.parse_args()
-    
+
     train_yolov8(
         epochs=args.epochs,
         batch_size=args.batch_size,

@@ -12,16 +12,17 @@ Usage:
     python apps/train.py faster-rcnn --config configs/faster_rcnn_config.yaml
 
     # Train with custom epochs/batch size
-    python apps/train.py faster-rcnn --config configs/faster_rcnn_config.yaml
+    python apps/train.py faster-rcnn --config configs/faster_rcnn_config.yaml --epochs 20 --batch-size 4
 
     # Resume from last checkpoint (auto-detects)
-    python apps/train.py faster-rcnn --config configs/faster_rcnn_config.yaml
+    python apps/train.py faster-rcnn --config configs/faster_rcnn_config.yaml --resume
 
     # Resume from specific checkpoint
-    python apps/train.py faster-rcnn --config configs/faster_rcnn_config.yaml
+    python apps/train.py faster-rcnn --config configs/faster_rcnn_config.yaml \
+        --checkpoint artifacts/checkpoints/faster_rcnn/train/weights/last.pt
 
     # Custom run name
-    python apps/train.py faster-rcnn --config configs/faster_rcnn_config.yaml
+    python apps/train.py faster-rcnn --config configs/faster_rcnn_config.yaml --name baseline
 
 Training outputs saved to: artifacts/checkpoints/faster_rcnn/{name}/
     - args.yaml - Configuration used for this run
@@ -861,7 +862,7 @@ def get_next_run_dir(base_dir: Path, name: str = 'train') -> Path:
     Similar to Ultralytics YOLO behavior.
 
     Args:
-        base_dir: Base checkpoint directory (e.g., models/checkpoints/fasterrcnn)
+        base_dir: Base checkpoint directory (e.g., artifacts/checkpoints/faster_rcnn)
         name: Base name for run directory (default: 'train')
 
     Returns:
