@@ -2,21 +2,75 @@
 YOLOv8n Training Script for CAMEL Infrared Dataset
 
 Usage:
-    python scripts/train_yolov8.py
-    python scripts/train_yolov8.py --resume
+    python apps/train.py yolov8 --config configs/yolov8_config.yaml
 """
 
 import argparse
-import yaml
+import random
 from pathlib import Path
 
+import numpy as np
+import torch
 from ultralytics import YOLO
 
-def load_config(config_path: str = 'configs/yolov8_config.yaml') -> dict:
-    """Load training configuration from YAML file."""
-    with open(config_path, 'r') as f:
-        return yaml.safe_load(f)
+from infrared_detection.common import load_config
 
+
+REPO_ROOT = Path(__file__).resolve().parents[4]
+IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".bmp", ".npy"}
+
+
+def count_dataset_images(image_dir: str | Path) -> int:
+    """Count unique image stems across supported image representations."""
+
+    directory = Path(image_dir)
+    stems = {
+        path.stem
+        for path in directory.iterdir()
+        if path.is_file() and path.suffix.lower() in IMAGE_EXTENSIONS
+    }
+    return len(stems)
+
+
+def resolve_dataset_yaml(dataset_yaml: str | Path, repo_root: Path = REPO_ROOT) -> Path:
+    """Resolve a dataset YAML independently of the process working directory."""
+
+    path = Path(dataset_yaml)
+    resolved = path if path.is_absolute() else (repo_root / path)
+    resolved = resolved.resolve()
+    if not resolved.exists():
+        raise FileNotFoundError(f"Dataset YAML not found: {resolved}")
+    return resolved
+
+
+def resolve_training_device(device: str | int | None) -> str | int:
+    """Validate an explicitly requested CUDA device instead of silently falling back."""
+
+    if device is None:
+        return 0 if torch.cuda.is_available() else "cpu"
+    if isinstance(device, str) and device.lower() == "cpu":
+        return "cpu"
+    try:
+        device_index = int(device)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("Device must be 'cpu' or a CUDA device index such as 0.") from exc
+    if not torch.cuda.is_available():
+        raise RuntimeError(
+            f"CUDA device {device_index} requested, but this PyTorch installation has no CUDA support."
+        )
+    if device_index < 0 or device_index >= torch.cuda.device_count():
+        raise RuntimeError(f"CUDA device {device_index} is unavailable.")
+    return device_index
+
+
+def seed_everything(seed: int) -> None:
+    """Seed Python, NumPy, and PyTorch for repeatable experiments."""
+
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
 
 def train_yolov8(
     epochs: int = None,
@@ -24,7 +78,13 @@ def train_yolov8(
     img_size: int = None,
     resume: bool = False,
     config_path: str = 'configs/yolov8_config.yaml',
-):
+    device: str | int | None = None,
+    seed: int | None = None,
+    data: str | Path | None = None,
+    project: str | Path | None = None,
+    name: str = "train",
+    dry_run: bool = False,
+) -> Path:
     """
     Train YOLOv8n on CAMEL infrared dataset.
     
@@ -35,22 +95,25 @@ def train_yolov8(
         resume (bool): Resume from last training. Default: False
         config_path (str): Path to config YAML file
     """
-    # Load configuration
+    config_path = str(resolve_dataset_yaml(config_path, REPO_ROOT)) if not Path(config_path).is_absolute() else config_path
     config = load_config(config_path)
     
     # Override config with CLI args if provided
-    epochs = epochs or config['training']['epochs']
-    batch_size = batch_size or config['training']['batch_size']
-    img_size = img_size or config['model']['img_size']
+    epochs = config['training']['epochs'] if epochs is None else epochs
+    batch_size = config['training']['batch_size'] if batch_size is None else batch_size
+    img_size = config['model']['img_size'] if img_size is None else img_size
+    resolved_device = resolve_training_device(config['model']['device'] if device is None else device)
+    resolved_seed = config.get('training', {}).get('seed', 7) if seed is None else seed
+    seed_everything(int(resolved_seed))
     
     # Setup absolute checkpoint directory to avoid runs/detect/ prefix
-    checkpoint_dir = Path(config['checkpoint']['resume_from']).resolve()
-    
-    # Initialize model
-    model = YOLO(config['model']['name'])
+    checkpoint_dir = (Path(project).resolve() if project is not None else Path(config['checkpoint']['resume_from']).resolve())
     
     # Dataset path
-    dataset_yaml = Path(config['data']['dataset_path']) / 'camel.yaml'
+    dataset_yaml = resolve_dataset_yaml(
+        data if data is not None else Path(config['data']['dataset_path']) / 'camel.yaml',
+        REPO_ROOT,
+    )
     
     if not dataset_yaml.exists():
         raise FileNotFoundError(
@@ -66,28 +129,28 @@ def train_yolov8(
     val_labels_dir = dataset_root / 'labels' / 'val'
     
     # Count files
-    train_images = list(train_images_dir.glob('*.npy')) if train_images_dir.exists() else []
+    train_images_count = count_dataset_images(train_images_dir) if train_images_dir.exists() else 0
     train_labels = list(train_labels_dir.glob('*.txt')) if train_labels_dir.exists() else []
-    val_images = list(val_images_dir.glob('*.npy')) if val_images_dir.exists() else []
+    val_images_count = count_dataset_images(val_images_dir) if val_images_dir.exists() else 0
     val_labels = list(val_labels_dir.glob('*.txt')) if val_labels_dir.exists() else []
     
     print(f"\n{'='*60}")
     print(f"DATASET VERIFICATION")
     print(f"{'='*60}")
     print(f"Training Set:")
-    print(f"  Images: {len(train_images)}")
+    print(f"  Images: {train_images_count}")
     print(f"  Labels: {len(train_labels)}")
-    print(f"  Match: {'✓' if len(train_images) == len(train_labels) else '✗ MISMATCH!'}")
+    print(f"  Match: {'✓' if train_images_count == len(train_labels) else '✗ MISMATCH!'}")
     print(f"\nValidation Set:")
-    print(f"  Images: {len(val_images)}")
+    print(f"  Images: {val_images_count}")
     print(f"  Labels: {len(val_labels)}")
-    print(f"  Match: {'✓' if len(val_images) == len(val_labels) else '✗ MISMATCH!'}")
+    print(f"  Match: {'✓' if val_images_count == len(val_labels) else '✗ MISMATCH!'}")
     print(f"{'='*60}\n")
     
-    if len(train_images) != len(train_labels):
-        print(f"WARNING: Training images ({len(train_images)}) != labels ({len(train_labels)})")
-    if len(val_images) != len(val_labels):
-        print(f"WARNING: Validation images ({len(val_images)}) != labels ({len(val_labels)})")
+    if train_images_count != len(train_labels):
+        print(f"WARNING: Training images ({train_images_count}) != labels ({len(train_labels)})")
+    if val_images_count != len(val_labels):
+        print(f"WARNING: Validation images ({val_images_count}) != labels ({len(val_labels)})")
     
     print(f"Training YOLOv8n on infrared dataset...")
     print(f"  Config file: {config_path}")
@@ -95,7 +158,15 @@ def train_yolov8(
     print(f"  Image size: {img_size}")
     print(f"  Epochs: {epochs}")
     print(f"  Batch size: {batch_size}")
-    print(f"  Expected batches per epoch: {len(train_images) // batch_size}")
+    print(f"  Expected batches per epoch: {train_images_count // batch_size}")
+    print(f"  Device: {resolved_device}")
+    print(f"  Seed: {resolved_seed}")
+
+    if dry_run:
+        return checkpoint_dir / name
+
+    # Initialize model only after dry-run validation has completed.
+    model = YOLO(config['model']['name'])
     
     # Train with settings from config
     results = model.train(
@@ -103,12 +174,12 @@ def train_yolov8(
         epochs=epochs,
         imgsz=img_size,
         batch=batch_size,
-        device=config['model']['device'],
+        device=resolved_device,
         patience=config['training']['patience'],
         save=True,
         save_period=config['checkpoint']['save_interval'],
         project=str(checkpoint_dir),  # Use absolute path to avoid runs/detect/ prefix
-        name='train',
+        name=name,
         resume=resume,
         pretrained=config['model']['pretrained'],
         
@@ -128,10 +199,11 @@ def train_yolov8(
         
         verbose=True,
         compile=False,  # Disable compilation for better compatibility and debugging
+        seed=int(resolved_seed),
     )
     
     print(f"\nTraining completed!")
-    print(f"  Results saved to: {checkpoint_dir}/train")
+    print(f"  Results saved to: {checkpoint_dir}/{name}")
     
     # Export to ONNX if configured
     if config['export']['onnx']:
@@ -190,6 +262,12 @@ Examples:
         action='store_true',
         help='Resume training from last checkpoint',
     )
+    parser.add_argument('--device', default=None, help="CUDA device index or 'cpu'.")
+    parser.add_argument('--seed', type=int, default=None, help='Random seed for reproducible training.')
+    parser.add_argument('--data', default=None, help='Dataset YAML path.')
+    parser.add_argument('--project', default=None, help='Output project directory.')
+    parser.add_argument('--name', default='train', help='Experiment run name.')
+    parser.add_argument('--dry-run', action='store_true', help='Print resolved settings without training.')
     
     args = parser.parse_args()
     
@@ -199,6 +277,12 @@ Examples:
         img_size=args.img_size,
         resume=args.resume,
         config_path=args.config,
+        device=args.device,
+        seed=args.seed,
+        data=args.data,
+        project=args.project,
+        name=args.name,
+        dry_run=args.dry_run,
     )
 
 

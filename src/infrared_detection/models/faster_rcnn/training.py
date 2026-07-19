@@ -9,21 +9,21 @@ similar to Ultralytics YOLO, with all logs, checkpoints, and metrics in each run
 
 Usage:
     # Train from scratch
-    python src/python/models/train_faster_rcnn.py
+    python apps/train.py faster-rcnn --config configs/faster_rcnn_config.yaml
 
     # Train with custom epochs/batch size
-    python src/python/models/train_faster_rcnn.py --epochs 50 --batch-size 16
+    python apps/train.py faster-rcnn --config configs/faster_rcnn_config.yaml
 
     # Resume from last checkpoint (auto-detects)
-    python src/python/models/train_faster_rcnn.py --resume
+    python apps/train.py faster-rcnn --config configs/faster_rcnn_config.yaml
 
     # Resume from specific checkpoint
-    python src/python/models/train_faster_rcnn.py --checkpoint models/checkpoints/fasterrcnn/train/weights/last.pt
+    python apps/train.py faster-rcnn --config configs/faster_rcnn_config.yaml
 
     # Custom run name
-    python src/python/models/train_faster_rcnn.py --name experiment1
+    python apps/train.py faster-rcnn --config configs/faster_rcnn_config.yaml
 
-Training outputs saved to: models/checkpoints/fasterrcnn/{name}/
+Training outputs saved to: artifacts/checkpoints/faster_rcnn/{name}/
     - args.yaml - Configuration used for this run
     - train.log - Training log file
     - results.csv - Training metrics per epoch (YOLO-style format)
@@ -45,10 +45,7 @@ import argparse
 import csv
 import json
 import logging
-import os
-import sys
 import time
-import yaml
 from pathlib import Path
 from datetime import datetime
 from collections import defaultdict
@@ -57,32 +54,22 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from torch.utils.data import DataLoader, default_collate
+from torch.utils.data import DataLoader
 
 import torchvision.models as models
 from torchvision.models.detection import FasterRCNN, FasterRCNN_MobileNet_V3_Large_FPN_Weights
-from torchvision.models.detection.backbone_utils import resnet_fpn_backbone
 from torchvision.models.detection.faster_rcnn import FastRCNNPredictor
 from torchvision.ops import box_iou
 
 from tqdm import tqdm
 
-# Add src/python directory to path for imports
-sys.path.insert(0, str(Path(__file__).parent.parent))
-
-from dataset.dataset import CAMELDataset
-from dataset.faster_rcnn_augmentations import FasterRCNNAugmentations, InferenceAugmentations
+from infrared_detection.common import load_config
+from infrared_detection.data import CAMELDataset
 
 
 # ==============================================================================
 # CONFIGURATION AND SETUP
 # ==============================================================================
-
-def load_config(config_path: str = 'configs/faster_rcnn_config.yaml') -> dict:
-    """Load training configuration from YAML file."""
-    with open(config_path, 'r') as f:
-        return yaml.safe_load(f)
-
 
 def setup_logging(log_file: str):
     """
@@ -1045,7 +1032,7 @@ def train_faster_rcnn(
     batch_size = batch_size or config['training']['batch_size']
 
     # Setup run directory (train, train2, train3, etc.)
-    base_checkpoint_dir = Path("models/checkpoints/fasterrcnn")
+    base_checkpoint_dir = Path("artifacts/checkpoints/faster_rcnn")
 
     # If resuming, use existing checkpoint directory
     if resume or checkpoint_path:
