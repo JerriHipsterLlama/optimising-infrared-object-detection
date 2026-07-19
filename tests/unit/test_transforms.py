@@ -9,11 +9,6 @@ Tests for:
 import unittest
 import numpy as np
 import torch
-from pathlib import Path
-import sys
-
-# Add src to path for imports
-sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from infrared_detection.data.transforms import ImageTransforms, InferenceTransforms
 

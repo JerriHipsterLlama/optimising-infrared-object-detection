@@ -4,7 +4,7 @@ Unit tests for CAMEL dataset loading module.
 Tests for:
 - CAMELDataset class
 - Image loading from disk
-- Label parsing from YOLO format
+- Label parsing from Pascal VOC corner coordinates
 - Dataset splits (train/val/test)
 """
 
@@ -14,11 +14,6 @@ import torch
 from pathlib import Path
 import tempfile
 import shutil
-import sys
-import os
-
-# Add src to path for imports
-sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from infrared_detection.data.dataset import CAMELDataset, create_dataloaders
 
@@ -34,11 +29,11 @@ class TestCAMELDatasetInitialization(unittest.TestCase):
         
         # Create directory structure
         cls.train_images = cls.data_dir / "images" / "train"
-        cls.train_labels = cls.data_dir / "labels" / "train"
+        cls.train_labels = cls.data_dir / "labels_pascal" / "train"
         cls.val_images = cls.data_dir / "images" / "val"
-        cls.val_labels = cls.data_dir / "labels" / "val"
+        cls.val_labels = cls.data_dir / "labels_pascal" / "val"
         cls.test_images = cls.data_dir / "images" / "test"
-        cls.test_labels = cls.data_dir / "labels" / "test"
+        cls.test_labels = cls.data_dir / "labels_pascal" / "test"
         
         for d in [cls.train_images, cls.train_labels, cls.val_images, cls.val_labels, 
                   cls.test_images, cls.test_labels]:
@@ -60,15 +55,11 @@ class TestCAMELDatasetInitialization(unittest.TestCase):
                     img_data = np.random.randint(0, 255, (256, 336), dtype=np.uint8)
                     import cv2
                     cv2.imwrite(str(img_path), img_data)
-                
-                # Create label file for sequence
-                lbl_path = lbl_dir / f"{seq_name}.txt"
-                with open(lbl_path, 'w') as f:
-                    # Write 3 dummy bounding boxes
-                    # Format: class_id x_center y_center width height (normalized)
-                    f.write("0 0.5 0.5 0.3 0.4\n")
-                    f.write("0 0.2 0.3 0.15 0.2\n")
-                    f.write("1 0.8 0.7 0.2 0.25\n")
+                    # Pascal VOC corner coordinates: class_id x1 y1 x2 y2.
+                    lbl_path = lbl_dir / f"{img_path.stem}.txt"
+                    with open(lbl_path, 'w') as f:
+                        f.write("0 10 20 110 220\n")
+                        f.write("1 40 60 140 160\n")
     
     @classmethod
     def tearDownClass(cls):
@@ -116,13 +107,24 @@ class TestCAMELDatasetInitialization(unittest.TestCase):
             CAMELDataset(root_dir=bad_path, split='train')
     
     def test_missing_labels_directory(self):
-        """Test error handling when labels directory is missing."""
+        """Test error handling when Pascal VOC labels are missing."""
         # Create data dir without labels
         bad_dir = Path(self.temp_dir) / "camel_bad"
         (bad_dir / "images" / "train").mkdir(parents=True, exist_ok=True)
         
         with self.assertRaises(FileNotFoundError):
             CAMELDataset(root_dir=str(bad_dir), split='train')
+
+    def test_yolo_labels_directory_is_not_used_as_a_fallback(self):
+        """The Pascal-only loader must reject the legacy YOLO label location."""
+        yolo_only_dir = Path(self.temp_dir) / "camel_yolo_only"
+        images_dir = yolo_only_dir / "images" / "train"
+        images_dir.mkdir(parents=True, exist_ok=True)
+        (yolo_only_dir / "labels" / "train").mkdir(parents=True, exist_ok=True)
+        np.save(images_dir / "Seq01_000.npy", np.zeros((256, 336), dtype=np.uint8))
+
+        with self.assertRaises(FileNotFoundError):
+            CAMELDataset(root_dir=str(yolo_only_dir), split='train')
 
 
 class TestCAMELDatasetLoading(unittest.TestCase):
@@ -136,7 +138,7 @@ class TestCAMELDatasetLoading(unittest.TestCase):
         
         # Create directory structure
         cls.train_images = cls.data_dir / "images" / "train"
-        cls.train_labels = cls.data_dir / "labels" / "train"
+        cls.train_labels = cls.data_dir / "labels_pascal" / "train"
         
         cls.train_images.mkdir(parents=True, exist_ok=True)
         cls.train_labels.mkdir(parents=True, exist_ok=True)
@@ -150,39 +152,29 @@ class TestCAMELDatasetLoading(unittest.TestCase):
             # Create image with specific values for testing
             img_data = np.full((256, 336), 128, dtype=np.uint8)
             cv2.imwrite(str(img_path), img_data)
-        
-        # Create label file
-        lbl_path = cls.train_labels / f"{seq_name}.txt"
-        with open(lbl_path, 'w') as f:
-            f.write("0 0.5 0.5 0.3 0.4\n")
-            f.write("1 0.2 0.3 0.15 0.2\n")
+            lbl_path = cls.train_labels / f"{img_path.stem}.txt"
+            with open(lbl_path, 'w') as f:
+                f.write("0 10 20 110 220\n")
+                f.write("1 40 60 140 160\n")
     
     @classmethod
     def tearDownClass(cls):
         """Clean up temporary directory."""
         shutil.rmtree(cls.temp_dir)
     
-    def test_image_to_labels_mapping_direction(self):
-        """Ensure image_to_labels maps image_path -> label_path."""
+    def test_labels_preserve_pascal_corner_coordinates(self):
+        """Labels are loaded unchanged from the per-image Pascal file."""
         dataset = CAMELDataset(
             root_dir=str(self.data_dir),
             split='train',
         )
-        
-        # image_to_labels should not be empty for our synthetic dataset
-        self.assertTrue(hasattr(dataset, "image_to_labels"))
-        self.assertGreater(len(dataset.image_to_labels), 0)
-        
-        for img_path_str, lbl_path in dataset.image_to_labels.items():
-            # Keys should be image paths inside the train images directory
-            self.assertIsInstance(img_path_str, str)
-            self.assertTrue(img_path_str.endswith(".png"))
-            self.assertIn(str(self.train_images), img_path_str)
-            
-            # Values should be label paths inside the train labels directory
-            self.assertIsInstance(lbl_path, (str, Path))
-            self.assertTrue(str(lbl_path).endswith(".txt"))
-            self.assertIn(str(self.train_labels), str(lbl_path))
+
+        _, targets = dataset[0]
+
+        torch.testing.assert_close(
+            targets["boxes"],
+            torch.tensor([[10.0, 20.0, 110.0, 220.0], [40.0, 60.0, 140.0, 160.0]]),
+        )
     
     def test_get_item_returns_tuple(self):
         """Test that __getitem__ returns (image, targets) tuple."""
@@ -288,7 +280,7 @@ class TestCAMELDatasetEmptyLabels(unittest.TestCase):
         cls.data_dir = Path(cls.temp_dir) / "camel"
         
         cls.train_images = cls.data_dir / "images" / "train"
-        cls.train_labels = cls.data_dir / "labels" / "train"
+        cls.train_labels = cls.data_dir / "labels_pascal" / "train"
         
         cls.train_images.mkdir(parents=True, exist_ok=True)
         cls.train_labels.mkdir(parents=True, exist_ok=True)
@@ -302,10 +294,11 @@ class TestCAMELDatasetEmptyLabels(unittest.TestCase):
             img_data = np.ones((256, 336), dtype=np.uint8) * 100
             cv2.imwrite(str(img_path), img_data)
         
-        # Create empty label file (no bounding boxes)
-        lbl_path = cls.train_labels / f"{seq_name}.txt"
-        with open(lbl_path, 'w') as f:
-            f.write("")  # Empty file
+        # Create empty per-image label files (no bounding boxes)
+        for image_path in cls.train_images.glob("*.png"):
+            lbl_path = cls.train_labels / f"{image_path.stem}.txt"
+            with open(lbl_path, 'w') as f:
+                f.write("")
     
     @classmethod
     def tearDownClass(cls):
@@ -337,24 +330,23 @@ class TestDataloaderCreation(unittest.TestCase):
         # Create full structure
         for split in ['train', 'val']:
             (cls.data_dir / "images" / split).mkdir(parents=True, exist_ok=True)
-            (cls.data_dir / "labels" / split).mkdir(parents=True, exist_ok=True)
+            (cls.data_dir / "labels_pascal" / split).mkdir(parents=True, exist_ok=True)
         
         import cv2
         
         # Create test data for both splits
         for split in ['train', 'val']:
             img_dir = cls.data_dir / "images" / split
-            lbl_dir = cls.data_dir / "labels" / split
+            lbl_dir = cls.data_dir / "labels_pascal" / split
             
             seq_name = "Seq01"
             for img_idx in range(4):
                 img_path = img_dir / f"{seq_name}_{img_idx:03d}.png"
                 img_data = np.random.randint(0, 255, (256, 336), dtype=np.uint8)
                 cv2.imwrite(str(img_path), img_data)
-            
-            lbl_path = lbl_dir / f"{seq_name}.txt"
-            with open(lbl_path, 'w') as f:
-                f.write("0 0.5 0.5 0.3 0.4\n")
+                lbl_path = lbl_dir / f"{img_path.stem}.txt"
+                with open(lbl_path, 'w') as f:
+                    f.write("0 10 20 110 220\n")
     
     @classmethod
     def tearDownClass(cls):
