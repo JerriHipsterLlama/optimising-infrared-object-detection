@@ -1,15 +1,11 @@
 """Tests for the low precision quantization utilities."""
 
-import sys
 import tempfile
-from pathlib import Path
 import unittest
 
 import torch
 
-sys.path.insert(0, str(Path(__file__).parent.parent))
-
-from python.optimisations.LPQ.low_precision_quantization import (
+from infrared_detection.compression.quantization import (
     dequantize_state_dict,
     quantize_checkpoint,
     quantize_state_dict,
