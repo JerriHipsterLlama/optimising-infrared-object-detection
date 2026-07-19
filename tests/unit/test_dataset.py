@@ -20,7 +20,7 @@ import os
 # Add src to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from src.python.dataset.dataset import CAMELDataset, create_dataloaders
+from infrared_detection.data.dataset import CAMELDataset, create_dataloaders
 
 
 class TestCAMELDatasetInitialization(unittest.TestCase):

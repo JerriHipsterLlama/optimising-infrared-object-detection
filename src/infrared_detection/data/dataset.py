@@ -15,7 +15,7 @@ import torch
 from torch.utils.data import Dataset
 from pathlib import Path
 from typing import Tuple, List, Dict, Optional
-from .transforms import ImageTransforms, InferenceTransforms
+from infrared_detection.data.transforms import ImageTransforms, InferenceTransforms
 
 
 class CAMELDataset(Dataset):
@@ -48,7 +48,10 @@ class CAMELDataset(Dataset):
         self.split = split
         
         self.images_dir = self.root_dir / "images" / split
-        self.labels_dir = self.root_dir / "labels_pascal" / split
+        pascal_labels_dir = self.root_dir / "labels_pascal" / split
+        yolo_labels_dir = self.root_dir / "labels" / split
+        self.labels_format = "pascal" if pascal_labels_dir.exists() else "yolo"
+        self.labels_dir = pascal_labels_dir if pascal_labels_dir.exists() else yolo_labels_dir
         
         # Verify directories exist
         if not self.images_dir.exists():
@@ -72,7 +75,12 @@ class CAMELDataset(Dataset):
         if len(self.image_files) == 0:
             raise ValueError(f"No image files found in {self.images_dir}")
         
-        print(f"Loaded {len(self.image_files)} images from {split} split (Pascal VOC format)")
+        self.image_to_labels = {
+            str(path): self._label_path_for_image(path)
+            for path in self.image_files
+        }
+
+        print(f"Loaded {len(self.image_files)} images from {split} split ({self.labels_format} format)")
         
         # Set up transforms
         if split == "train" and augment:
@@ -107,7 +115,7 @@ class CAMELDataset(Dataset):
         # Apply transformations
         image = self.transforms(image)
         
-        # Load labels (already in corner format - no conversion!)
+        # Load labels and normalize them to corner coordinates.
         targets = self._load_labels(img_path)
         
         return image, targets
@@ -154,8 +162,7 @@ class CAMELDataset(Dataset):
                 - 'class_ids': torch.Tensor of shape (N,)
                 - 'image_path': str
         """
-        # Label file has same name as image file but with .txt extension
-        label_file = self.labels_dir / f"{img_path.stem}.txt"
+        label_file = self._label_path_for_image(img_path)
         
         boxes = []
         class_ids = []
@@ -170,12 +177,17 @@ class CAMELDataset(Dataset):
                     parts = line.split()
                     if len(parts) >= 5:
                         try:
-                            # Pascal VOC format: <class_id> <x1> <y1> <x2> <y2>
+                            # Pascal: class x1 y1 x2 y2; YOLO: class cx cy width height.
                             class_id = int(parts[0])
-                            x1 = float(parts[1])
-                            y1 = float(parts[2])
-                            x2 = float(parts[3])
-                            y2 = float(parts[4])
+                            values = [float(value) for value in parts[1:5]]
+                            if self.labels_format == "yolo":
+                                cx, cy, width, height = values
+                                x1 = (cx - width / 2.0) * self.image_width
+                                y1 = (cy - height / 2.0) * self.image_height
+                                x2 = (cx + width / 2.0) * self.image_width
+                                y2 = (cy + height / 2.0) * self.image_height
+                            else:
+                                x1, y1, x2, y2 = values
                             
                             # Validate box (ensure x2 > x1 and y2 > y1)
                             if x2 > x1 and y2 > y1:
@@ -200,6 +212,15 @@ class CAMELDataset(Dataset):
         }
         
         return targets
+
+    def _label_path_for_image(self, img_path: Path) -> Path:
+        """Resolve either per-image labels or the legacy per-sequence label."""
+
+        per_image = self.labels_dir / f"{img_path.stem}.txt"
+        if per_image.exists():
+            return per_image
+        sequence_name = img_path.stem.split("_")[0]
+        return self.labels_dir / f"{sequence_name}.txt"
     
     def get_image_info(self, idx: int) -> Dict:
         """
@@ -212,7 +233,7 @@ class CAMELDataset(Dataset):
             Dict with image path, size, and label info
         """
         img_path = self.image_files[idx]
-        label_file = self.labels_dir / f"{img_path.stem}.txt"
+        label_file = self._label_path_for_image(img_path)
         
         # Count objects in label file
         num_objects = 0
