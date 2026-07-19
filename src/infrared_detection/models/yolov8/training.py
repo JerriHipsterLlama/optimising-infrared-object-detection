@@ -222,10 +222,10 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog='''
 Examples:
-  python scripts/train_yolov8.py                                  # Use config defaults
-  python scripts/train_yolov8.py --epochs 50 --batch-size 16     # Override specific params
-  python scripts/train_yolov8.py --resume                         # Resume from last checkpoint
-  python scripts/train_yolov8.py --config configs/yolov8_config.yaml --epochs 100
+  python apps/train.py yolov8                                    # Use config defaults
+  python apps/train.py yolov8 --epochs 50 --batch-size 16        # Override specific params
+  python apps/train.py yolov8 --resume                            # Resume from last checkpoint
+  python apps/train.py yolov8 --config configs/yolov8_config.yaml --epochs 100
         ''',
     )
     
