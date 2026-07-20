@@ -24,6 +24,9 @@ matplotlib==3.10.8
 onnx==1.20.1
 onnxruntime==1.23.2
 
+# Dependency-aware structured channel pruning
+torch-pruning>=1.4.0
+
 # Jupyter Notebooks
 jupyter==1.1.1
 
