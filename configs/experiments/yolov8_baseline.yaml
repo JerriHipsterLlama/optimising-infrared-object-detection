@@ -1,0 +1,21 @@
+model:
+  checkpoint: models/baseline/yolov8/train/weights/best.pt
+  architecture: yolov8n
+
+data:
+  dataset_yaml: data/camel/camel.yaml
+  calibration_image_dir: data/camel/images/train
+
+experiment:
+  image_size: 336
+  num_classes: 4
+  seed: 7
+  batch_size: 1
+  output_dir: runs/experiments/yolov8_baseline
+
+runtime:
+  device: 0
+  precision: fp32
+  conf: 0.25
+  iou: 0.6
+

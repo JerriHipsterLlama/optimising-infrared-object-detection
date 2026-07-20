@@ -1,0 +1,40 @@
+model:
+  checkpoint: models/baseline/yolov8/train/weights/best.pt
+  architecture: yolov8n
+
+data:
+  dataset_yaml: data/camel/camel.yaml
+  calibration_image_dir: data/camel/images/train
+
+experiment:
+  image_size: 336
+  num_classes: 4
+  seed: 7
+  batch_size: 1
+  output_dir: runs/experiments/compression_matrix
+
+runtime:
+  device: 0
+  precision: fp16
+  conf: 0.25
+  iou: 0.6
+
+variants:
+  - dense_fp32
+  - dense_fp16
+  - lpq_int8
+  - structured_pruning
+  - structured_pruning_kd
+  - lpq_int8_kd
+  - structured_pruning_lpq_int8_kd
+
+compression:
+  target_channel_reduction: 0.25
+  pruning_step: 0.05
+  protected_layers: [model.0, model.22]
+
+distillation:
+  enabled: false
+  feature_weight: 1.0
+  prediction_weight: 1.0
+

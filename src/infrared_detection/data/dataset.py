@@ -56,7 +56,7 @@ class CAMELDataset(Dataset):
         if not self.labels_dir.exists():
             raise FileNotFoundError(
                 f"Labels directory not found: {self.labels_dir}\n"
-                f"Run: python tools/convert_labels_to_pascal_format.py --split {split}"
+                f"Run: python scripts/dataset/convert_labels_to_pascal_format.py --split {split}"
             )
         
         # Image properties (CAMEL infrared standard size)

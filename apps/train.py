@@ -64,7 +64,7 @@ def build_parser() -> argparse.ArgumentParser:
     yolov8_parser = subparsers.add_parser("yolov8", help="Train a YOLOv8 model.")
     yolov8_parser.add_argument(
         "--config",
-        default="configs/yolov8_config.yaml",
+        default="configs/models/yolov8.yaml",
         help="Path to the YOLOv8 configuration file.",
     )
     yolov8_parser.add_argument("--epochs", type=int, default=None, help="Override epochs.")
@@ -90,7 +90,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     faster_rcnn_parser.add_argument(
         "--config",
-        default="configs/faster_rcnn_config.yaml",
+        default="configs/models/faster_rcnn.yaml",
         help="Path to the Faster R-CNN configuration file.",
     )
     faster_rcnn_parser.add_argument(

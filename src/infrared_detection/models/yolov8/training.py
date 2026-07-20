@@ -2,7 +2,7 @@
 YOLOv8n Training Script for CAMEL Infrared Dataset
 
 Usage:
-    python apps/train.py yolov8 --config configs/yolov8_config.yaml
+    python apps/train.py yolov8 --config configs/models/yolov8.yaml
 """
 
 import argparse
@@ -77,7 +77,7 @@ def train_yolov8(
     batch_size: int = None,
     img_size: int = None,
     resume: bool = False,
-    config_path: str = 'configs/yolov8_config.yaml',
+    config_path: str = 'configs/models/yolov8.yaml',
     device: str | int | None = None,
     seed: int | None = None,
     data: str | Path | None = None,
@@ -225,15 +225,15 @@ Examples:
   python apps/train.py yolov8                                    # Use config defaults
   python apps/train.py yolov8 --epochs 50 --batch-size 16        # Override specific params
   python apps/train.py yolov8 --resume                            # Resume from last checkpoint
-  python apps/train.py yolov8 --config configs/yolov8_config.yaml --epochs 100
+  python apps/train.py yolov8 --config configs/models/yolov8.yaml --epochs 100
         ''',
     )
 
     parser.add_argument(
         '--config',
         type=str,
-        default='configs/yolov8_config.yaml',
-        help='Path to config YAML file (default: configs/yolov8_config.yaml)',
+        default='configs/models/yolov8.yaml',
+        help='Path to config YAML file (default: configs/models/yolov8.yaml)',
     )
 
     parser.add_argument(

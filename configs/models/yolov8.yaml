@@ -38,7 +38,7 @@ data:
 
 augmentation:
   # Ultralytics YOLOv8n defaults for infrared object detection
-  # These must be synchronized with configs/faster_rcnn_config.yaml
+  # These must be synchronized with configs/models/faster_rcnn.yaml
   
   # Rotation degrees (±rotation)
   degrees: 15.0

@@ -9,20 +9,20 @@ similar to Ultralytics YOLO, with all logs, checkpoints, and metrics in each run
 
 Usage:
     # Train from scratch
-    python apps/train.py faster-rcnn --config configs/faster_rcnn_config.yaml
+    python apps/train.py faster-rcnn --config configs/models/faster_rcnn.yaml
 
     # Train with custom epochs/batch size
-    python apps/train.py faster-rcnn --config configs/faster_rcnn_config.yaml --epochs 20 --batch-size 4
+    python apps/train.py faster-rcnn --config configs/models/faster_rcnn.yaml --epochs 20 --batch-size 4
 
     # Resume from last checkpoint (auto-detects)
-    python apps/train.py faster-rcnn --config configs/faster_rcnn_config.yaml --resume
+    python apps/train.py faster-rcnn --config configs/models/faster_rcnn.yaml --resume
 
     # Resume from specific checkpoint
-    python apps/train.py faster-rcnn --config configs/faster_rcnn_config.yaml \
+    python apps/train.py faster-rcnn --config configs/models/faster_rcnn.yaml \
         --checkpoint artifacts/checkpoints/faster_rcnn/train/weights/last.pt
 
     # Custom run name
-    python apps/train.py faster-rcnn --config configs/faster_rcnn_config.yaml --name baseline
+    python apps/train.py faster-rcnn --config configs/models/faster_rcnn.yaml --name baseline
 
 Training outputs saved to: artifacts/checkpoints/faster_rcnn/{name}/
     - args.yaml - Configuration used for this run
@@ -1009,7 +1009,7 @@ def train_faster_rcnn(
     batch_size: int = None,
     resume: bool = False,
     checkpoint_path: str = None,
-    config_path: str = 'configs/faster_rcnn_config.yaml',
+    config_path: str = 'configs/models/faster_rcnn.yaml',
     name: str = 'train',
     no_augment: bool = False,
 ):
@@ -1435,7 +1435,7 @@ if __name__ == '__main__':
     parser.add_argument('--batch-size', type=int, default=None, help='Batch size')
     parser.add_argument('--resume', action='store_true', help='Resume from last checkpoint')
     parser.add_argument('--checkpoint', type=str, default=None, help='Path to checkpoint to resume from')
-    parser.add_argument('--config', type=str, default='configs/faster_rcnn_config.yaml', help='Config file path')
+    parser.add_argument('--config', type=str, default='configs/models/faster_rcnn.yaml', help='Config file path')
     parser.add_argument('--name', type=str, default='train', help='Name for this training run (default: train)')
     parser.add_argument('--no-augment', action='store_true', help='Disable augmentations (for testing only)')
 
