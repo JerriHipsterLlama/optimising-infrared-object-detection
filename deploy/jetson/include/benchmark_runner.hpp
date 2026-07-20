@@ -9,6 +9,7 @@ struct BenchmarkOptions {
     std::string engine_path;
     std::string input_directory;
     std::string output_json;
+    std::string raw_output_directory;
     int warmup{20};
     int iterations{100};
 };

@@ -4,9 +4,12 @@ warmup: 20
 iterations: 100
 engine_input_dir: data/camel/images/test
 engine_output: artifacts/predictions/jetson_benchmark.json
+raw_output_dir: artifacts/predictions/jetson_raw_outputs
 metrics:
   - preprocess_mean_ms
+  - h2d_mean_ms
   - inference_mean_ms
+  - d2h_mean_ms
   - postprocess_mean_ms
   - latency_mean_ms
   - latency_p50_ms

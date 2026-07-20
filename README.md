@@ -57,6 +57,8 @@ python apps/export.py --model artifacts/checkpoints/best.pt --format onnx --imgs
 
 The Python-side TensorRT adapter is available through `apps/benchmark.py`. The native Jetson benchmark is documented under `deploy/jetson/` and is the authoritative path for batch-1 latency, p50/p95 timing, memory, power, and thermal measurements.
 
+The native benchmark consumes real test images and can preserve raw TensorRT output tensors for offline Python post-processing. Use the native output for deployment-performance metrics and the Python evaluation pipeline for mAP, precision, recall, and class-level analysis.
+
 ## Repository layout
 
 ```text

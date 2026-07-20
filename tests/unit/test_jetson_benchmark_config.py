@@ -10,4 +10,14 @@ def test_jetson_benchmark_config_declares_reproducible_measurement_fields():
     assert config["batch_size"] == 1
     assert config["warmup"] > 0
     assert config["iterations"] >= 100
-    assert {"preprocess_mean_ms", "inference_mean_ms", "postprocess_mean_ms", "latency_p50_ms", "latency_p95_ms", "fps"}.issubset(config["metrics"])
+    assert config["raw_output_dir"]
+    assert {
+        "preprocess_mean_ms",
+        "h2d_mean_ms",
+        "inference_mean_ms",
+        "d2h_mean_ms",
+        "postprocess_mean_ms",
+        "latency_p50_ms",
+        "latency_p95_ms",
+        "fps",
+    }.issubset(config["metrics"])

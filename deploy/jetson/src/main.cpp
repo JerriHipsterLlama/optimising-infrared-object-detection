@@ -10,7 +10,7 @@ namespace {
 void usage(const char* executable) {
     std::cout << "Usage: " << executable
               << " --engine PATH --input-dir PATH --output-json PATH"
-                 " [--warmup N] [--iterations N]\n";
+                 " [--raw-output-dir PATH] [--warmup N] [--iterations N]\n";
 }
 
 }  // namespace
@@ -32,6 +32,7 @@ int main(int argc, char** argv) {
         if (argument == "--engine") options.engine_path = value();
         else if (argument == "--input-dir") options.input_directory = value();
         else if (argument == "--output-json") options.output_json = value();
+        else if (argument == "--raw-output-dir") options.raw_output_directory = value();
         else if (argument == "--warmup") options.warmup = std::stoi(value());
         else if (argument == "--iterations") options.iterations = std::stoi(value());
         else throw std::invalid_argument("unknown argument: " + argument);
