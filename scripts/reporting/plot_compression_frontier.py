@@ -8,7 +8,7 @@ from pathlib import Path
 import matplotlib.pyplot as plt
 import pandas as pd
 
-from src.python.evaluation.frontier import pareto_optimal_rows
+from infrared_detection.evaluation.frontier import pareto_optimal_rows
 
 
 def main() -> None:
@@ -37,4 +37,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

@@ -11,3 +11,6 @@ artifacts/**
 !artifacts/
 !artifacts/**/
 !artifacts/**/.gitkeep
+*.egg-info/
+__pycache__/
+*.py[cod]
