@@ -8,6 +8,25 @@ Evaluate hardware-aware, structured cluster pruning for the infrared YOLO detect
 
 The prior `focus-on-yolo` implementation is a source of cluster-selection and ONNX inspection logic, not a drop-in pruning executor. Its default operation zeroes ONNX filters while retaining tensor shapes, so it cannot reduce the dense exported model size. The new implementation must structurally remove safe channel groups from the trainable detector before export and fine-tune the resulting model.
 
+## Two-Stage Cluster-Size Selection
+
+### Stage 1: Single-Layer Sensitivity Profiling
+
+1. Measure the unpruned baseline on the RTX 3070 and, when available, the Jetson Orin Nano.
+2. For each safe backbone/neck dependency group, remove one small structural cluster at each candidate cluster size that fits the group width.
+3. Export and validate each probe candidate. Record model bytes, mAP50-95 change, and p50/p95 latency through the deployment path.
+4. Use RTX 3070 measurements only to eliminate candidates that provide no measurable latency or size benefit, or create disproportionate accuracy loss.
+5. Re-run the surviving probes on the Jetson Orin Nano. Retain the non-dominated cluster sizes: those with a real Orin Nano benefit and no disproportionate local mAP loss.
+
+Single-layer profiling narrows the cluster-size candidates; it does not select the final model.
+
+### Stage 2: Global Prune-Fine-Tune Evaluation
+
+1. Apply each surviving cluster size at configured global prune ratios.
+2. Fine-tune every structurally pruned candidate from its trainable model, then export and validate it.
+3. Benchmark every valid candidate on the Jetson Orin Nano.
+4. Select and report the primary and exploratory candidates using the evaluation contract below.
+
 ## Candidate Generation
 
 1. Load a trained YOLO checkpoint and its dataset/training configuration.
@@ -38,7 +57,7 @@ The selected primary candidate is the smallest `primary_feasible` exported model
 
 ## Hardware-Aware Cluster Sizing
 
-The evaluation sweeps configured cluster sizes rather than treating an LCM-derived value as an unverified optimum. Each candidate is measured on the Jetson deployment path using the existing benchmark configuration. A cluster size is therefore selected by measured model-size/accuracy/latency trade-offs, matching the empirical principle of Gamanayake et al.
+The evaluation sweeps configured cluster sizes rather than treating an LCM-derived value as an unverified optimum. RTX 3070 measurements are an interim screening signal only; the Jetson Orin Nano is the final target and the sole hardware environment used for final candidate ranking. A cluster size is therefore selected by measured model-size/accuracy/Orin-Nano-latency trade-offs, matching the empirical principle of Gamanayake et al.
 
 ## Error Handling
 
