@@ -2,10 +2,15 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
+import torch
 import yaml
+from torch import nn
 
+from infrared_detection import export as export_module
+from infrared_detection.compression.pruning import cluster_probe as cluster_probe_module
 from infrared_detection.evaluation import cluster_workflow
 from infrared_detection.evaluation.cluster_workflow import ClusterEvaluationAdapters, merge_jetson_metrics, run_cluster_evaluation
 
@@ -33,7 +38,11 @@ def write_config(tmp_path: Path) -> Path:
                     "global_ratios": [0.25],
                     "fine_tune_epochs": 1,
                 },
-                "targets": {"rtx_screening_device": "rtx", "orin_target": "orin"},
+                "targets": {
+                    "rtx_screening_device": "rtx",
+                    "orin_target": "jetson_orin_nano",
+                    "orin_execution_device": "0",
+                },
             },
             sort_keys=False,
         ),
@@ -127,7 +136,7 @@ def test_successful_probes_are_profiled_on_rtx_before_global_orin_evaluation(tmp
     assert all(row["screening_device"] == "rtx" for row in probe_rows)
     assert all(row["latency_p50_ms"] == 4.0 for row in probe_rows)
     assert profiled_devices.count("rtx") == len(probe_rows)
-    assert any(device == "orin" for device in profiled_devices)
+    assert any(device == "jetson_orin_nano" for device in profiled_devices)
 
 
 def test_baseline_and_global_metrics_preserve_authoritative_orin_provenance(tmp_path, adapters):
@@ -145,12 +154,236 @@ def test_baseline_and_global_metrics_preserve_authoritative_orin_provenance(tmp_
     baseline = next(row for row in rows if row["stage"] == "baseline")
     probes = [row for row in rows if row["stage"] == "probe"]
     globals_ = [row for row in rows if row["stage"] == "global"]
-    assert baseline["metric_device"] == "orin"
-    assert baseline["evaluation_device"] == "orin"
+    assert baseline["metric_device"] == "0"
+    assert baseline["target_device"] == "jetson_orin_nano"
+    assert baseline["evaluation_device"] == "0"
     assert all(row["metric_device"] == "rtx" for row in probes)
-    assert all(row["metric_device"] == "orin" for row in globals_)
-    assert all(row["evaluation_device"] == "orin" for row in globals_)
-    assert evaluated_devices[0] == "orin"
+    assert all(row["metric_device"] == "0" for row in globals_)
+    assert all(row["target_device"] == "jetson_orin_nano" for row in globals_)
+    assert all(row["evaluation_device"] == "0" for row in globals_)
+    assert evaluated_devices[0] == "0"
+
+
+def test_default_non_dry_workflow_refuses_orin_claim_off_target(monkeypatch, tmp_path):
+    monkeypatch.setattr(cluster_workflow, "_is_jetson_orin_runtime", lambda: False)
+
+    with pytest.raises(RuntimeError, match="remote Orin adapter|Jetson Orin Nano"):
+        run_cluster_evaluation(write_config(tmp_path))
+
+
+def test_topology_preserving_trainer_returns_exact_pruned_module():
+    pruned = nn.Conv2d(3, 5, 1)
+
+    class CompatibleDetectionTrainer:
+        def get_model(self, cfg=None, weights=None, verbose=True):
+            del cfg, weights, verbose
+            return nn.Conv2d(3, 8, 1)
+
+    trainer_type = cluster_workflow._topology_preserving_trainer(
+        pruned,
+        trainer_cls=CompatibleDetectionTrainer,
+    )
+    trainer = trainer_type.__new__(trainer_type)
+
+    assert trainer.get_model(cfg="dense.yaml", weights=pruned, verbose=False) is pruned
+
+
+def test_topology_preserving_trainer_fails_closed_for_incompatible_api():
+    class IncompatibleDetectionTrainer:
+        def get_model(self, architecture):
+            del architecture
+
+    with pytest.raises(RuntimeError, match="topology-preserving|Ultralytics"):
+        cluster_workflow._topology_preserving_trainer(
+            nn.Conv2d(3, 5, 1),
+            trainer_cls=IncompatibleDetectionTrainer,
+        )
+
+
+def test_fine_tune_uses_topology_preserving_trainer_and_orin_execution_device(tmp_path):
+    best = tmp_path / "fine-tune" / "weights" / "best.pt"
+
+    class FakeYolo:
+        def __init__(self):
+            self.model = nn.Conv2d(3, 5, 1)
+            self.trainer = None
+            self.train_kwargs = None
+
+        def train(self, **kwargs):
+            self.train_kwargs = kwargs
+            self.trainer = SimpleNamespace(best=best)
+            return {"ok": True}
+
+    model = FakeYolo()
+    config = yaml.safe_load(write_config(tmp_path).read_text(encoding="utf-8"))
+
+    assert cluster_workflow._fine_tune_yolo(model, config, tmp_path / "candidate") == best
+    assert model.train_kwargs["device"] == "0"
+    trainer_type = model.train_kwargs["trainer"]
+    trainer = trainer_type.__new__(trainer_type)
+    assert trainer.get_model(weights=model.model) is model.model
+
+
+class _ConvWrapper(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.conv = nn.Conv2d(3, 8, 1)
+
+
+class _C2fLike(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.cv1 = _ConvWrapper()
+
+
+class _DetectionModel(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.model = nn.ModuleList([nn.Identity(), nn.Identity(), _C2fLike()])
+
+
+def test_safe_layers_accept_only_concrete_conv2d_paths(tmp_path):
+    model = SimpleNamespace(model=_DetectionModel())
+    config = yaml.safe_load(write_config(tmp_path).read_text(encoding="utf-8"))
+    config["pruning"]["safe_layers"] = ["model.2.cv1.conv"]
+
+    assert cluster_workflow._safe_layers(model, config) == ["model.2.cv1.conv"]
+
+    config["pruning"]["safe_layers"] = ["model.2"]
+    with pytest.raises(ValueError, match="Conv2d|prunable"):
+        cluster_workflow._safe_layers(model, config)
+
+
+def _importance_model() -> SimpleNamespace:
+    detection = _DetectionModel()
+    with torch.no_grad():
+        conv = detection.model[2].cv1.conv
+        for channel, magnitude in enumerate((9.0, 0.1, 0.2, 8.0, 0.3, 7.0, 6.0, 5.0)):
+            conv.weight[channel].fill_(magnitude)
+    return SimpleNamespace(model=detection)
+
+
+def test_structural_probe_uses_lowest_importance_complete_cluster(monkeypatch, tmp_path):
+    specs = []
+
+    def record_prune(model, example, spec):
+        del example
+        specs.append(spec)
+        return model
+
+    monkeypatch.setattr(cluster_probe_module, "run_structural_probe", record_prune)
+    config = yaml.safe_load(write_config(tmp_path).read_text(encoding="utf-8"))
+
+    cluster_workflow._structural_probe(
+        _importance_model(),
+        "model.2.cv1.conv",
+        cluster_size=2,
+        ratio=0.25,
+        config=config,
+    )
+
+    assert [spec.prune_indices for spec in specs] == [(1, 2)]
+
+
+def test_structural_probe_applies_requested_complete_clusters_sequentially(monkeypatch, tmp_path):
+    specs = []
+
+    def record_prune(model, example, spec):
+        del example
+        specs.append(spec)
+        return model
+
+    monkeypatch.setattr(cluster_probe_module, "run_structural_probe", record_prune)
+    config = yaml.safe_load(write_config(tmp_path).read_text(encoding="utf-8"))
+
+    cluster_workflow._structural_probe(
+        _importance_model(),
+        "model.2.cv1.conv",
+        cluster_size=2,
+        ratio=0.50,
+        config=config,
+    )
+
+    assert len(specs) == 2
+    assert all(len(spec.prune_indices) == 2 for spec in specs)
+
+
+def test_structural_probe_rejects_partial_cluster_that_would_remove_whole_layer(monkeypatch, tmp_path):
+    monkeypatch.setattr(cluster_probe_module, "run_structural_probe", lambda model, example, spec: model)
+    config = yaml.safe_load(write_config(tmp_path).read_text(encoding="utf-8"))
+
+    with pytest.raises(ValueError, match="complete cluster"):
+        cluster_workflow._structural_probe(
+            _importance_model(),
+            "model.2.cv1.conv",
+            cluster_size=8,
+            ratio=1.0,
+            config=config,
+        )
+
+
+def test_append_row_allocates_unique_id_after_multiple_collisions():
+    rows = []
+    for _ in range(3):
+        cluster_workflow._append_row(rows, cluster_workflow._base_row("duplicate", "probe"))
+
+    assert [row["candidate_id"] for row in rows] == ["duplicate", "duplicate-2", "duplicate-3"]
+
+
+def test_export_yolo_stages_checkpoint_and_artifact_under_candidate_directory(monkeypatch, tmp_path):
+    checkpoint = tmp_path / "source" / "best.pt"
+    checkpoint.parent.mkdir()
+    checkpoint.write_bytes(b"checkpoint")
+    adjacent_export = checkpoint.with_suffix(".onnx")
+    adjacent_export.write_bytes(b"preserve-me")
+    seen_sources = []
+
+    def export_from_adjacent(model_path, format="onnx", **kwargs):
+        del format, kwargs
+        source = Path(model_path)
+        seen_sources.append(source)
+        artifact = source.with_suffix(".onnx")
+        artifact.write_bytes(b"isolated-export")
+        return artifact
+
+    monkeypatch.setattr(export_module, "export_yolo", export_from_adjacent)
+    config = yaml.safe_load(write_config(tmp_path).read_text(encoding="utf-8"))
+    config["export"] = {"format": "onnx"}
+    output_dir = tmp_path / "candidate"
+
+    exported = cluster_workflow._export_yolo(checkpoint, config, output_dir)
+
+    assert seen_sources[0].parent == output_dir
+    assert exported.parent == output_dir
+    assert exported.read_bytes() == b"isolated-export"
+    assert adjacent_export.read_bytes() == b"preserve-me"
+
+
+def test_export_yolo_saves_pruned_model_inside_candidate_before_export(monkeypatch, tmp_path):
+    saved_paths = []
+
+    class SaveablePrunedModel:
+        def save(self, path):
+            saved = Path(path)
+            saved_paths.append(saved)
+            saved.write_bytes(b"pruned-checkpoint")
+
+    def export_from_adjacent(model_path, format="onnx", **kwargs):
+        del format, kwargs
+        artifact = Path(model_path).with_suffix(".onnx")
+        artifact.write_bytes(b"pruned-export")
+        return artifact
+
+    monkeypatch.setattr(export_module, "export_yolo", export_from_adjacent)
+    config = yaml.safe_load(write_config(tmp_path).read_text(encoding="utf-8"))
+    config["export"] = {"format": "onnx"}
+    output_dir = tmp_path / "probe"
+
+    exported = cluster_workflow._export_yolo(SaveablePrunedModel(), config, output_dir)
+
+    assert saved_paths[0].parent == output_dir
+    assert exported.parent == output_dir
+    assert exported.read_bytes() == b"pruned-export"
 
 
 def test_same_format_baseline_artifact_and_physical_reduction_are_required(tmp_path, adapters):
@@ -178,6 +411,7 @@ def test_same_format_baseline_artifact_and_physical_reduction_are_required(tmp_p
     assert baseline["artifact_format"] == "onnx"
     assert export_calls
     assert all(row["status"] in {"failed", "rejected_accuracy"} for row in probe_rows)
+    assert all(row["export_validation_status"] == "failed" for row in probe_rows)
     assert all("serialized" in (row["error"] or "").lower() or "reduction" in (row["error"] or "").lower() for row in probe_rows)
 
 
@@ -267,6 +501,7 @@ def test_candidate_artifact_must_match_the_baseline_export_format(tmp_path, adap
     probe_rows = [row for row in rows if row["stage"] == "probe"]
     assert baseline["artifact_format"] == "onnx"
     assert all(row["status"] == "failed" for row in probe_rows)
+    assert all(row["export_validation_status"] == "failed" for row in probe_rows)
     assert all("format" in row["error"].lower() for row in probe_rows)
 
 
@@ -325,6 +560,7 @@ def test_manifest_waits_for_authoritative_orin_global_winner(tmp_path, adapters)
     manifest = json.loads((tmp_path / "artifacts" / "manifest.json").read_text(encoding="utf-8"))
     expected = "global-cluster-16-ratio-0.25"
     assert any(row["candidate_id"] == expected and row["status"] == "primary_feasible" for row in rows)
+    assert all(row["export_validation_status"] == "passed" for row in rows if row["stage"] == "global")
     assert manifest["selected_candidate_ids"] == {"primary": None, "exploratory": None}
 
 
@@ -334,6 +570,7 @@ def test_merge_orin_metrics_updates_only_hardware_fields(tmp_path):
             "candidate_id": "global-c4-r0.20",
             "stage": "global",
             "status": "primary_feasible",
+            "export_validation_status": "passed",
             "map50_95": 0.495,
             "serialized_bytes": 1234,
             "latency_p50_ms": None,
@@ -370,9 +607,24 @@ def test_merge_orin_metrics_updates_only_hardware_fields(tmp_path):
     assert merged[0]["temperature_c"] == 48.2
     assert merged[0]["hardware_benchmarked"] is True
     assert merged[0]["profile_device"] == "jetson_orin_nano"
+    assert merged[0]["benchmark_path"] == str(benchmark.resolve())
+    assert merged[0]["benchmark_provenance"] == {
+        "candidate_id": "global-c4-r0.20",
+        "device": "jetson_orin_nano",
+    }
     assert "8.1" in (tmp_path / "candidates.csv").read_text(encoding="utf-8")
     manifest = json.loads((tmp_path / "manifest.json").read_text(encoding="utf-8"))
     assert manifest["selected_candidate_ids"] == {"primary": "global-c4-r0.20", "exploratory": None}
+    assert manifest["benchmarks"] == [
+        {
+            "candidate_id": "global-c4-r0.20",
+            "benchmark_path": str(benchmark.resolve()),
+            "benchmark_provenance": {
+                "candidate_id": "global-c4-r0.20",
+                "device": "jetson_orin_nano",
+            },
+        }
+    ]
 
 
 @pytest.mark.parametrize("provenance", [{}, {"device": "rtx"}, {"target": "jetson_orin_nano_devkit"}])
@@ -387,6 +639,55 @@ def test_merge_jetson_metrics_rejects_missing_or_wrong_orin_provenance(tmp_path,
         merge_jetson_metrics(rows, benchmark)
 
 
+@pytest.mark.parametrize(
+    "measurements",
+    [
+        {},
+        {"latency_p50_ms": 8.1},
+        {"latency_p50_ms": "8.1", "latency_p95_ms": 8.6},
+        {"latency_p50_ms": 8.1, "latency_p95_ms": None},
+        {"latency_p50_ms": True, "latency_p95_ms": 8.6},
+        {"latency_p50_ms": float("nan"), "latency_p95_ms": 8.6},
+    ],
+)
+def test_merge_jetson_metrics_requires_real_p50_and_p95_measurements(tmp_path, measurements):
+    rows = [{"candidate_id": "global-c4-r0.20", "stage": "global", "hardware_benchmarked": False}]
+    benchmark = write_json(
+        tmp_path / "orin.json",
+        {
+            "candidate_id": "global-c4-r0.20",
+            "device": "jetson_orin_nano",
+            **measurements,
+        },
+    )
+
+    with pytest.raises(ValueError, match="latency_p50_ms.*latency_p95_ms|latency_p95_ms.*latency_p50_ms"):
+        merge_jetson_metrics(rows, benchmark)
+
+    assert rows[0]["hardware_benchmarked"] is False
+
+
+def test_manifest_does_not_select_unvalidated_export(tmp_path):
+    rows = [
+        {
+            "candidate_id": "global-unvalidated",
+            "stage": "global",
+            "status": "primary_feasible",
+            "map50_95": 0.5,
+            "serialized_bytes": 1,
+            "latency_p50_ms": 1.0,
+            "latency_p95_ms": 2.0,
+            "hardware_benchmarked": True,
+            "export_validation_status": "not_run",
+        }
+    ]
+
+    cluster_workflow._write_artifacts(tmp_path, tmp_path / "config.yaml", rows)
+
+    manifest = json.loads((tmp_path / "manifest.json").read_text(encoding="utf-8"))
+    assert manifest["selected_candidate_ids"] == {"primary": None, "exploratory": None}
+
+
 def test_valid_orin_merge_reclassifies_failed_global_and_selects_only_benchmarked_rows(tmp_path):
     rows = [
         {"candidate_id": "baseline", "stage": "baseline", "map50_95": 0.50, "serialized_bytes": 1000},
@@ -397,6 +698,7 @@ def test_valid_orin_merge_reclassifies_failed_global_and_selects_only_benchmarke
             "map50_95": 0.495,
             "serialized_bytes": 500,
             "hardware_benchmarked": False,
+            "export_validation_status": "passed",
         },
         {
             "candidate_id": "global-unbenchmarked",
@@ -405,6 +707,7 @@ def test_valid_orin_merge_reclassifies_failed_global_and_selects_only_benchmarke
             "map50_95": 0.499,
             "serialized_bytes": 1,
             "hardware_benchmarked": False,
+            "export_validation_status": "passed",
         },
         {
             "candidate_id": "probe-feasible",
@@ -413,6 +716,7 @@ def test_valid_orin_merge_reclassifies_failed_global_and_selects_only_benchmarke
             "map50_95": 0.50,
             "serialized_bytes": 1,
             "hardware_benchmarked": True,
+            "export_validation_status": "passed",
         },
     ]
     benchmark = write_json(
@@ -421,6 +725,7 @@ def test_valid_orin_merge_reclassifies_failed_global_and_selects_only_benchmarke
             "candidate_id": "global-failed",
             "device": "jetson_orin_nano",
             "latency_p50_ms": 8.1,
+            "latency_p95_ms": 8.6,
         },
     )
 

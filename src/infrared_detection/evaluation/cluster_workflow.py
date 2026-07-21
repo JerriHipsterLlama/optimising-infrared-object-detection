@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import inspect
 import json
+import math
 import re
+import shutil
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -116,6 +119,9 @@ def _base_row(
         "evaluation_device": None,
         "profile_device": None,
         "hardware_benchmarked": False,
+        "benchmark_path": None,
+        "benchmark_provenance": None,
+        "export_validation_status": "not_run",
         "reason": None,
     }
 
@@ -124,9 +130,12 @@ def _append_row(rows: list[Metrics], row: Metrics) -> None:
     """Append a row while preserving a unique identifier in every manifest."""
 
     candidate_id = str(row["candidate_id"])
-    duplicates = sum(existing["candidate_id"] == candidate_id for existing in rows)
-    if duplicates:
-        row["candidate_id"] = f"{candidate_id}-{duplicates + 1}"
+    existing_ids = {str(existing["candidate_id"]) for existing in rows}
+    if candidate_id in existing_ids:
+        suffix = 2
+        while f"{candidate_id}-{suffix}" in existing_ids:
+            suffix += 1
+        row["candidate_id"] = f"{candidate_id}-{suffix}"
     rows.append(row)
 
 
@@ -136,6 +145,7 @@ def _write_artifacts(output_dir: Path, config_path: Path, rows: list[Metrics]) -
         for row in rows
         if row.get("stage") == "global"
         and row.get("hardware_benchmarked") is True
+        and row.get("export_validation_status") == "passed"
         and row.get("status") in _FEASIBLE_STATUSES
     )
     write_metrics_csv(output_dir / "candidates.csv", rows)
@@ -149,6 +159,15 @@ def _write_artifacts(output_dir: Path, config_path: Path, rows: list[Metrics]) -
                 name: winner["candidate_id"] if winner is not None else None
                 for name, winner in winners.items()
             },
+            "benchmarks": [
+                {
+                    "candidate_id": row["candidate_id"],
+                    "benchmark_path": row["benchmark_path"],
+                    "benchmark_provenance": row["benchmark_provenance"],
+                }
+                for row in rows
+                if row.get("benchmark_path") is not None
+            ],
             "rows": rows,
         },
     )
@@ -162,8 +181,25 @@ def merge_jetson_metrics(rows: list[Metrics], benchmark_path: Path) -> list[Metr
     candidate_id = benchmark.get("candidate_id")
     if not isinstance(candidate_id, str) or not candidate_id:
         raise ValueError("Native Jetson benchmark JSON must include a non-empty candidate_id.")
-    if benchmark.get("device") != _ORIN_TARGET and benchmark.get("target") != _ORIN_TARGET:
+    supplied_provenance = {
+        key: benchmark[key]
+        for key in ("device", "target")
+        if key in benchmark
+    }
+    if not supplied_provenance or any(value != _ORIN_TARGET for value in supplied_provenance.values()):
         raise ValueError("Native Jetson benchmark JSON must identify device or target as jetson_orin_nano.")
+    required_latencies = ("latency_p50_ms", "latency_p95_ms")
+    if any(
+        isinstance(benchmark.get(field), bool)
+        or not isinstance(benchmark.get(field), (int, float))
+        or not math.isfinite(float(benchmark[field]))
+        or float(benchmark[field]) <= 0.0
+        for field in required_latencies
+    ):
+        raise ValueError(
+            "Native Jetson benchmark JSON must include positive finite numeric latency_p50_ms and latency_p95_ms "
+            "measurements."
+        )
 
     matches = [row for row in rows if row.get("candidate_id") == candidate_id]
     if len(matches) != 1:
@@ -173,6 +209,8 @@ def merge_jetson_metrics(rows: list[Metrics], benchmark_path: Path) -> list[Metr
     for field in _JETSON_HARDWARE_FIELDS:
         if field in benchmark:
             row[field] = benchmark[field]
+    row["benchmark_path"] = str(path.resolve())
+    row["benchmark_provenance"] = {"candidate_id": candidate_id, **supplied_provenance}
     row["hardware_benchmarked"] = True
     row["profile_device"] = _ORIN_TARGET
 
@@ -302,6 +340,7 @@ def _validate_candidate_reduction(
     baseline: Mapping[str, Any],
     active: ClusterEvaluationAdapters,
 ) -> None:
+    row["export_validation_status"] = "failed"
     if row["artifact_format"] != baseline["artifact_format"]:
         raise ValueError(
             "Candidate artifact format does not match the baseline export format "
@@ -316,6 +355,7 @@ def _validate_candidate_reduction(
     }
     row.update(validator(before, after))
     row["serialized_bytes"] = after["serialized_bytes"]
+    row["export_validation_status"] = "passed"
 
 
 def run_cluster_evaluation(
@@ -335,15 +375,25 @@ def run_cluster_evaluation(
         _write_artifacts(output_dir, resolved_config_path, rows)
         return rows
 
+    targets = config["targets"]
+    orin_target = str(targets["orin_target"])
+    if orin_target != _ORIN_TARGET:
+        raise ValueError(f"targets.orin_target must be {_ORIN_TARGET!r}, got {orin_target!r}.")
+    if adapters is None and not _is_jetson_orin_runtime():
+        raise RuntimeError(
+            "Refusing to claim Jetson Orin Nano results on an unverified host. "
+            "Run the default workflow on the Jetson Orin Nano or inject a remote Orin adapter."
+        )
+
     active = adapters or ClusterEvaluationAdapters.defaults(config)
     pruning = config["pruning"]
-    rtx_device = str(config["targets"]["rtx_screening_device"])
-    orin_device = str(config["targets"]["orin_target"])
+    rtx_device = str(targets["rtx_screening_device"])
+    orin_execution_device = _orin_execution_device(config)
     rows = _planned_rows(config)
     baseline = next(row for row in rows if row["stage"] == "baseline")
     try:
         baseline_model = active.load_model(checkpoint)
-        baseline_metrics = active.evaluate(baseline_model, config, orin_device)
+        baseline_metrics = active.evaluate(baseline_model, config, orin_execution_device)
         baseline_model_stats = active.stats(baseline_model)
         baseline_export = Path(active.export(checkpoint, config, output_dir / "baseline"))
         _record_export(baseline, baseline_export)
@@ -354,8 +404,8 @@ def run_cluster_evaluation(
             {**dict(baseline_model_stats), **dict(baseline_artifact_stats)},
         )
         baseline["status"] = "completed"
-        baseline["target_device"] = orin_device
-        baseline["evaluation_device"] = orin_device
+        baseline["target_device"] = orin_target
+        baseline["evaluation_device"] = orin_execution_device
     except Exception as exc:
         _failure(baseline, exc)
         for row in rows[1:]:
@@ -414,17 +464,17 @@ def run_cluster_evaluation(
             candidate_dir = output_dir / row["candidate_id"]
             best_checkpoint = active.fine_tune(candidate, config, candidate_dir)
             reloaded = active.reload_model(Path(best_checkpoint))
-            global_metrics = active.evaluate(reloaded, config, orin_device)
+            global_metrics = active.evaluate(reloaded, config, orin_execution_device)
             global_model_stats = active.stats(reloaded)
             exported = Path(active.export(Path(best_checkpoint), config, candidate_dir))
             row["checkpoint_path"] = str(Path(best_checkpoint))
             _record_export(row, exported, baseline)
             _validate_candidate_reduction(row, global_model_stats, exported, baseline, active)
             _metrics_row(row, global_metrics, {**dict(global_model_stats), "serialized_bytes": row["serialized_bytes"]}, baseline)
-            row["target_device"] = orin_device
-            row.update(active.profile(exported, orin_device))
-            row["evaluation_device"] = orin_device
-            row["profile_device"] = orin_device
+            row["target_device"] = orin_target
+            row.update(active.profile(exported, orin_target))
+            row["evaluation_device"] = orin_execution_device
+            row["profile_device"] = orin_target
             row["status"] = classify_candidate(float(baseline["map50_95"]), float(row["map50_95"]))
         except Exception as exc:
             _failure(row, exc)
@@ -459,33 +509,80 @@ def _evaluate_yolo(model: Any, config: Mapping[str, Any], device: str) -> Metric
 
 
 def _safe_layers(model: Any, config: Mapping[str, Any]) -> list[str]:
+    from torch import nn
+
+    unwrapped = _unwrap_model(model)
+    modules = dict(unwrapped.named_modules())
     configured = config["pruning"].get("safe_layers")
     if configured:
         protected = set(config["pruning"]["protected_layers"])
-        return [layer for layer in configured if layer not in protected and not layer.startswith("model.22")]
+        safe = []
+        for layer in configured:
+            if any(layer == name or layer.startswith(f"{name}.") for name in protected) or layer.startswith("model.22"):
+                raise ValueError(f"Configured safe layer {layer!r} is protected and cannot be pruned.")
+            module = modules.get(layer)
+            if module is None:
+                raise ValueError(f"Configured safe layer {layer!r} does not exist in the model.")
+            if not isinstance(module, nn.Conv2d):
+                raise ValueError(
+                    f"Configured safe layer {layer!r} is {type(module).__name__}, not a prunable Conv2d module."
+                )
+            safe.append(layer)
+        return safe
     from infrared_detection.compression.pruning import compute_channel_importance
 
     protected = set(config["pruning"]["protected_layers"])
-    return [name for name in sorted(compute_channel_importance(_unwrap_model(model))) if name not in protected and not name.startswith("model.22")]
+    return [
+        name
+        for name in sorted(compute_channel_importance(unwrapped))
+        if isinstance(modules[name], nn.Conv2d)
+        and not any(name == protected_name or name.startswith(f"{protected_name}.") for protected_name in protected)
+        and not name.startswith("model.22")
+    ]
 
 
 def _structural_probe(model: Any, layer: str, cluster_size: int, ratio: float, config: Mapping[str, Any]) -> Any:
     import torch
+    from torch import nn
 
-    from infrared_detection.compression.pruning import ClusterSpec
+    from infrared_detection.compression.pruning import compute_channel_importance, plan_low_importance_clusters
     from infrared_detection.compression.pruning.cluster_probe import run_structural_probe as prune
 
-    module = dict(_unwrap_model(model).named_modules())[layer]
-    width = int(getattr(module, "out_channels", None) or getattr(module, "out_features"))
-    count = max(cluster_size, (int(width * ratio) // cluster_size) * cluster_size)
-    count = min(count, width - 1)
-    indices = tuple(range(count))
+    if cluster_size <= 0:
+        raise ValueError("Cluster size must be positive.")
+    unwrapped = _unwrap_model(model)
+    module = dict(unwrapped.named_modules()).get(layer)
+    if not isinstance(module, nn.Conv2d):
+        raise ValueError(f"Structural probe target {layer!r} is not a prunable Conv2d module.")
+    width = int(module.out_channels)
+    requested_clusters = max(1, int(width * ratio) // cluster_size)
+    available_clusters = (width - 1) // cluster_size
+    if available_clusters < 1:
+        raise ValueError(
+            f"Layer {layer!r} has no complete cluster of size {cluster_size} that can be pruned safely."
+        )
+    requested_clusters = min(requested_clusters, available_clusters)
+    protected = set(config["pruning"]["protected_layers"])
     example = torch.zeros(1, 3, int(config["experiment"]["image_size"]), int(config["experiment"]["image_size"]))
-    pruned = prune(_unwrap_model(model), example, ClusterSpec(layer, cluster_size, indices))
+
+    for _ in range(requested_clusters):
+        scores = compute_channel_importance(unwrapped)
+        if layer not in scores:
+            raise ValueError(f"No channel-importance scores are available for prunable layer {layer!r}.")
+        specs = plan_low_importance_clusters(
+            {layer: scores[layer]},
+            cluster_size,
+            protected,
+            max_clusters_per_layer=1,
+        )
+        if len(specs) != 1 or len(specs[0].prune_indices) != cluster_size:
+            raise ValueError(f"Could not plan one complete low-importance cluster for layer {layer!r}.")
+        unwrapped = prune(unwrapped, example, specs[0])
+
     if hasattr(model, "model"):
-        model.model = pruned
+        model.model = unwrapped
         return model
-    return pruned
+    return unwrapped
 
 
 def _structural_global(model: Any, cluster_size: int, ratio: float, config: Mapping[str, Any]) -> Any:
@@ -494,14 +591,63 @@ def _structural_global(model: Any, cluster_size: int, ratio: float, config: Mapp
     return model
 
 
+def _topology_preserving_trainer(pruned_model: Any, trainer_cls: type | None = None) -> type:
+    """Return a guarded DetectionTrainer that reuses the physically pruned module."""
+
+    if trainer_cls is None:
+        import ultralytics
+        from ultralytics.models.yolo.detect import DetectionTrainer
+
+        if ultralytics.__version__ != "8.4.7":
+            raise RuntimeError(
+                "Topology-preserving training is validated only for pinned Ultralytics 8.4.7; "
+                f"found {ultralytics.__version__}."
+            )
+        trainer_cls = DetectionTrainer
+
+    parameters = tuple(inspect.signature(trainer_cls.get_model).parameters)
+    if parameters[:4] != ("self", "cfg", "weights", "verbose"):
+        raise RuntimeError(
+            "Ultralytics DetectionTrainer.get_model is incompatible with the topology-preserving training path."
+        )
+
+    class TopologyPreservingDetectionTrainer(trainer_cls):
+        def get_model(self, cfg=None, weights=None, verbose=True):
+            del cfg, verbose
+            if weights is not pruned_model:
+                raise RuntimeError(
+                    "Ultralytics did not pass the physically pruned module to the topology-preserving trainer."
+                )
+            return pruned_model
+
+    TopologyPreservingDetectionTrainer.__name__ = "TopologyPreservingDetectionTrainer"
+    return TopologyPreservingDetectionTrainer
+
+
+def _orin_execution_device(config: Mapping[str, Any]) -> str:
+    device = str(config["targets"].get("orin_execution_device", "0"))
+    if not device or "orin" in device.lower() or "jetson" in device.lower():
+        raise ValueError(
+            "targets.orin_execution_device must be a valid Ultralytics execution device such as '0' or 'cpu', "
+            f"not {device!r}."
+        )
+    return device
+
+
 def _fine_tune_yolo(model: Any, config: Mapping[str, Any], output_dir: Path) -> Path:
-    runtime = config["runtime"]
     output_dir.mkdir(parents=True, exist_ok=True)
+    if "trainer" not in inspect.signature(model.train).parameters and not any(
+        parameter.kind is inspect.Parameter.VAR_KEYWORD
+        for parameter in inspect.signature(model.train).parameters.values()
+    ):
+        raise RuntimeError("Ultralytics Model.train cannot accept the topology-preserving trainer override.")
+    trainer_type = _topology_preserving_trainer(_unwrap_model(model))
     result = model.train(
+        trainer=trainer_type,
         data=str(resolve_repo_path(config["data"]["dataset_yaml"], _repo_root())),
         epochs=int(config["pruning"]["fine_tune_epochs"]),
         imgsz=int(config["experiment"]["image_size"]),
-        device=runtime["device"],
+        device=_orin_execution_device(config),
         seed=int(config["experiment"]["seed"]),
         project=str(output_dir),
         name="fine_tune",
@@ -518,11 +664,24 @@ def _export_yolo(checkpoint: Any, config: Mapping[str, Any], output_dir: Path) -
 
     output_dir.mkdir(parents=True, exist_ok=True)
     kwargs = {"format": config.get("export", {}).get("format", "onnx"), "imgsz": int(config["experiment"]["image_size"])}
-    if hasattr(checkpoint, "export"):
-        exported = checkpoint.export(**kwargs)
+    staged_checkpoint = output_dir / "export-source.pt"
+    if isinstance(checkpoint, (str, Path)):
+        shutil.copy2(Path(checkpoint), staged_checkpoint)
     else:
-        exported = export_yolo(checkpoint, **kwargs)
-    return Path(exported)
+        save = getattr(checkpoint, "save", None)
+        if not callable(save):
+            raise RuntimeError(
+                "Isolated export requires a checkpoint path or a save-capable pruned YOLO model."
+            )
+        save(staged_checkpoint)
+
+    exported = Path(export_yolo(staged_checkpoint, **kwargs))
+    if not exported.exists():
+        raise FileNotFoundError(f"Ultralytics export did not produce the reported artifact: {exported}")
+    isolated = output_dir / f"candidate{exported.suffix.lower()}"
+    if exported.resolve() != isolated.resolve():
+        shutil.copy2(exported, isolated)
+    return isolated
 
 
 def _is_jetson_orin_runtime() -> bool:

@@ -69,6 +69,8 @@ Complete the JSON from the tegrastats log with this supplemental schema before r
   "candidate_id": "global-cluster-16-ratio-0.2",
   "device": "jetson_orin_nano",
   "target": "jetson_orin_nano",
+  "latency_p50_ms": 8.1,
+  "latency_p95_ms": 8.6,
   "peak_memory_mb": 742.0,
   "power_w": 8.4,
   "energy_mj_per_inference": 70.8,
@@ -76,4 +78,4 @@ Complete the JSON from the tegrastats log with this supplemental schema before r
 }
 ```
 
-Copy the completed JSON back to the host and run the documented `merge_jetson_metrics` command from the repository README. The merge rejects missing or wrong Orin provenance, marks the matched row hardware-benchmarked, reclassifies it from its validation mAP against baseline, preserves mAP and serialized-size fields, and regenerates `candidates.csv` plus `manifest.json`. Final winner selection waits for this valid merge: only Orin data ranks final candidates.
+Copy the completed JSON back to the host and run the documented `merge_jetson_metrics` command from the repository README. The merge rejects missing or wrong Orin provenance and requires positive finite numeric p50 and p95 latency measurements before it marks the matched row hardware-benchmarked. It reclassifies the row from its validation mAP against baseline, preserves mAP and serialized-size fields, binds the benchmark path/provenance, and regenerates `candidates.csv` plus `manifest.json`. Final winner selection also requires a passed structural/size export validation: only validated candidates with measured Orin data can rank.

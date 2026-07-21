@@ -99,3 +99,51 @@ The complete requested Task 4 suite was also run:
 ```
 
 Result: `16 passed, 3 failed in 1.08s`. The remaining failures are `test_successful_probes_are_profiled_on_rtx_before_global_orin_evaluation`, `test_baseline_and_global_metrics_preserve_authoritative_orin_provenance`, and `test_same_format_baseline_artifact_and_physical_reduction_are_required`; they depend on the project’s torch-based pruning validation stack, which is absent from the shared venv. No full-green claim is made.
+
+## Production correction: final-review findings
+
+This section supersedes the earlier incomplete-environment concern above. The shared project virtual environment contains the pinned production stack, and the complete suite now runs with the isolated worktree's `src` first on `PYTHONPATH`.
+
+### Confirmed root causes
+
+- Ultralytics 8.4.7 `Model.train` called `DetectionTrainer.get_model(cfg=self.model.yaml, weights=self.model)`, whose default implementation rebuilt `DetectionModel` from the dense YAML before loading compatible weights. A structurally pruned module could therefore be replaced by dense topology.
+- The configured YOLOv8n paths `model.2`, `model.4`, and `model.6` are C2f containers, not directly prunable convolutions; the concrete targets are `model.2.cv1.conv`, `model.4.cv1.conv`, and `model.6.cv1.conv`.
+- The logical label `orin` was passed to Ultralytics as a CUDA device even though Ultralytics rejects it.
+- Production `_structural_probe` discarded channel-importance planning and removed `range(count)`, including a partial cluster when the requested cluster approached layer width.
+- `_append_row` counted only the unsuffixed identifier, so the third duplicate reused the second duplicate's `-2` suffix.
+- Ultralytics exports were returned from exporter-selected locations, allowing source-checkpoint-adjacent artifacts and cross-candidate collisions.
+- The native merge trusted device provenance without requiring actual latency measurements, and final selection did not explicitly require completed structural/size export validation.
+
+### Bounded fixes
+
+- Added a guarded custom `DetectionTrainer` for pinned Ultralytics 8.4.7. Its `get_model` returns the exact physically pruned module and fails closed if the trainer signature or `Model.train` override path is incompatible. The workflow reloads `best.pt` and validates reloaded parameter and same-format serialized-size reduction before a candidate can proceed.
+- Separated `targets.orin_target: jetson_orin_nano` from `targets.orin_execution_device: '0'`. Ultralytics evaluation/fine-tuning receives only the execution device. Default non-dry execution rejects an Orin claim on a non-Orin host unless adapters are injected for remote execution; RTX remains probe-screening evidence.
+- Updated safe-layer defaults to concrete Conv2d paths and reject missing, protected, detection-head, and non-Conv2d configured targets with clear errors.
+- Replaced prefix-index pruning with `compute_channel_importance` plus `plan_low_importance_clusters`. Each requested complete cluster is planned and applied sequentially; partial clusters and whole-layer removal are rejected.
+- Allocated duplicate candidate IDs with a collision loop.
+- Staged path checkpoints and save-capable pruned models inside each candidate directory before export, then copied the reported artifact to `candidate.<format>` in that directory. Source-adjacent artifacts are not used or overwritten.
+- Required exact candidate ID, exact Jetson Orin Nano provenance, and positive finite numeric p50/p95 latency before `hardware_benchmarked=True`. Only hardware fields are copied; benchmark path/provenance are bound into rows and manifest records.
+- Added `export_validation_status` and require `passed` together with a real Orin benchmark before winner selection. Functional exported-model inference parity remains explicitly out of scope for this correction.
+
+### TDD evidence
+
+All commands used:
+
+```powershell
+$env:PYTHONPATH = 'C:\Users\gerth\Documents\Engineering\optimising-infrared-object-detection-cluster-evaluation\src'
+& 'C:\Users\gerth\Documents\Engineering\optimising-infrared-object-detection\.venv\Scripts\python.exe' -m pytest <focused selectors> -q
+```
+
+- Baseline before changes: `118 passed, 12 warnings in 16.46s`.
+- Trainer/device/safe-layer RED: `6 failed, 1 passed in 5.10s`; failures were the expected missing custom trainer/API guard, logical-target device propagation, absent off-target guard, and non-prunable C2f acceptance.
+- Trainer/device/safe-layer GREEN: `7 passed in 4.03s`.
+- Importance/cluster/ID/export RED: `6 failed in 4.28s`; failures showed `(0, 1)` instead of low-importance `(1, 2)`, one four-index spec instead of two complete specs, an accepted partial cluster, duplicate `-2`, and two non-isolated export paths.
+- Importance/cluster/ID/export GREEN: `6 passed in 4.08s`.
+- Merge/validation RED: `11 failed, 1 passed in 4.46s`; failures showed missing export-validation state, absent benchmark path/provenance, accepted missing/non-numeric latency, and selection of an unvalidated export.
+- Merge/validation GREEN: `12 passed in 4.17s`.
+- Complete workflow module: `35 passed in 4.50s`.
+- Complete repository suite with worktree `src` first: `136 passed, 12 warnings in 15.70s`; the final pre-commit verification repeated this successfully as `136 passed, 12 warnings in 15.82s`. The warnings are the existing PyTorch pin-memory deprecations from dataset tests.
+
+### Remaining concern
+
+Automated tests validate trainer selection, topology guards, reloaded parameter/serialized-size reduction, artifact isolation, orchestration, and provenance contracts without running the infrared training dataset or physical TensorRT hardware. Functional inference parity of each exported model and native Orin measurements remain required execution evidence, not claims made by this correction.

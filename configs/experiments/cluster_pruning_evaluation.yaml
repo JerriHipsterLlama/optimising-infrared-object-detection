@@ -19,7 +19,7 @@ runtime:
 
 pruning:
   protected_layers: [model.0, model.22]
-  safe_layers: [model.2, model.4, model.6]
+  safe_layers: [model.2.cv1.conv, model.4.cv1.conv, model.6.cv1.conv]
   cluster_sizes: [8, 16, 32]
   probe_ratios: [0.05]
   global_ratios: [0.10, 0.20, 0.30]
@@ -31,7 +31,8 @@ screening:
 
 targets:
   rtx_screening_device: 0
-  orin_target: orin
+  orin_target: jetson_orin_nano
+  orin_execution_device: '0'
 
 export:
   format: engine
