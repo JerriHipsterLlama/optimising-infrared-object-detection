@@ -30,3 +30,15 @@ tegrastats --interval 1000 | tee artifacts/predictions/tegrastats.log
 ```
 
 Keep Jetson power mode, clocks, JetPack, CUDA, TensorRT, OpenCV, input resolution, warm-up, and iteration counts fixed across variants. For pure engine-performance measurements, omit `--raw-output-dir` so disk serialization is not included in end-to-end latency.
+
+## Cluster-pruning candidates
+
+The RTX host uses probe measurements only to screen cluster sizes. Final global candidates must be benchmarked on this Orin with their actual TensorRT engines; do not use RTX timing to rank them.
+
+For each global candidate, place the native JSON in the corresponding cluster-evaluation artifact directory and add its exact `candidate_id`:
+
+```bash
+python3 -c "import json; p='runs/experiments/cluster_pruning_evaluation/orin-global-cluster-16-ratio-0.20.json'; data=json.load(open(p)); data['candidate_id']='global-cluster-16-ratio-0.2'; open(p, 'w').write(json.dumps(data, indent=2) + '\\n')"
+```
+
+Copy the JSON back to the host and run the documented `merge_jetson_metrics` command from the repository README. The merge preserves Python validation mAP and serialized-size fields, replaces only native hardware metrics, and regenerates `candidates.csv` plus `manifest.json`. Merge every final candidate before selecting a winner: only Orin data ranks final candidates.

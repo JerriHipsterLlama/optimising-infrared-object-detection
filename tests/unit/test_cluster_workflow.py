@@ -7,7 +7,7 @@ import pytest
 import yaml
 
 from infrared_detection.evaluation import cluster_workflow
-from infrared_detection.evaluation.cluster_workflow import ClusterEvaluationAdapters, run_cluster_evaluation
+from infrared_detection.evaluation.cluster_workflow import ClusterEvaluationAdapters, merge_jetson_metrics, run_cluster_evaluation
 
 
 def write_config(tmp_path: Path) -> Path:
@@ -40,6 +40,11 @@ def write_config(tmp_path: Path) -> Path:
         encoding="utf-8",
     )
     return config_path
+
+
+def write_json(path: Path, payload: dict[str, object]) -> Path:
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    return path
 
 
 def _metrics(map50_95: float) -> dict[str, float]:
@@ -317,3 +322,47 @@ def test_manifest_records_the_smallest_authoritative_global_winner(tmp_path, ada
     expected = "global-cluster-16-ratio-0.25"
     assert any(row["candidate_id"] == expected and row["status"] == "primary_feasible" for row in rows)
     assert manifest["selected_candidate_ids"] == {"primary": expected, "exploratory": None}
+
+
+def test_merge_orin_metrics_updates_only_hardware_fields(tmp_path):
+    rows = [
+        {
+            "candidate_id": "global-c4-r0.20",
+            "stage": "global",
+            "status": "primary_feasible",
+            "map50_95": 0.495,
+            "serialized_bytes": 1234,
+            "latency_p50_ms": None,
+            "latency_p95_ms": None,
+            "fps": None,
+            "peak_memory_mb": None,
+            "power_w": None,
+            "energy_mj_per_inference": None,
+            "temperature_c": None,
+        }
+    ]
+    benchmark = write_json(
+        tmp_path / "orin.json",
+        {
+            "candidate_id": "global-c4-r0.20",
+            "map50_95": 0.1,
+            "serialized_bytes": 1,
+            "latency_p50_ms": 8.1,
+            "latency_p95_ms": 8.6,
+            "fps": 123.4,
+            "peak_memory_mb": 456.7,
+            "power_w": 12.3,
+            "energy_mj_per_inference": 99.6,
+            "temperature_c": 48.2,
+        },
+    )
+
+    merged = merge_jetson_metrics(rows, benchmark)
+
+    assert merged[0]["map50_95"] == 0.495
+    assert merged[0]["serialized_bytes"] == 1234
+    assert merged[0]["latency_p50_ms"] == 8.1
+    assert merged[0]["temperature_c"] == 48.2
+    assert "8.1" in (tmp_path / "candidates.csv").read_text(encoding="utf-8")
+    manifest = json.loads((tmp_path / "manifest.json").read_text(encoding="utf-8"))
+    assert manifest["selected_candidate_ids"] == {"primary": "global-c4-r0.20", "exploratory": None}

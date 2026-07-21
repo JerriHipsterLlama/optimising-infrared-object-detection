@@ -59,6 +59,30 @@ The Python-side TensorRT adapter is available through `apps/benchmark.py`. The n
 
 The native benchmark consumes real test images and can preserve raw TensorRT output tensors for offline Python post-processing. Use the native output for deployment-performance metrics and the Python evaluation pipeline for mAP, precision, recall, and class-level analysis.
 
+### Cluster-pruning execution
+
+Run the two-stage candidate workflow from the RTX host. Probe candidates are screened on the RTX only to remove clearly inferior cluster sizes; this screening does not rank final models.
+
+```powershell
+python apps/evaluate_cluster_pruning.py --config configs/experiments/cluster_pruning_evaluation.yaml
+```
+
+The workflow writes `candidates.csv` and `manifest.json` under the configured `runs/experiments/cluster_pruning_evaluation/` directory. Transfer each surviving global candidate's TensorRT engine to the Orin, build it there if necessary, and measure it with the native benchmark in `deploy/jetson/`. Write each native result back into that same experiment directory, using a distinct filename such as `orin-global-cluster-16-ratio-0.20.json`.
+
+The native JSON must be annotated with the candidate identifier before it is merged. For example, on the Orin:
+
+```bash
+python3 -c "import json; p='runs/experiments/cluster_pruning_evaluation/orin-global-cluster-16-ratio-0.20.json'; data=json.load(open(p)); data['candidate_id']='global-cluster-16-ratio-0.2'; open(p, 'w').write(json.dumps(data, indent=2) + '\\n')"
+```
+
+After transferring that JSON to the experiment directory, merge it on the host. The merge updates only native hardware fields (`latency_*`, FPS, memory, power, energy, and temperature); validation mAP and serialized-size fields remain unchanged. It rewrites both `candidates.csv` and `manifest.json`.
+
+```powershell
+python -c "import json; from pathlib import Path; from infrared_detection.evaluation.cluster_workflow import merge_jetson_metrics; output=Path('runs/experiments/cluster_pruning_evaluation'); merge_jetson_metrics(json.loads((output / 'manifest.json').read_text(encoding='utf-8'))['rows'], output / 'orin-global-cluster-16-ratio-0.20.json')"
+```
+
+Merge native results for every final global candidate before reading `selected_candidate_ids` from the manifest. Only measured Orin results rank final candidates; RTX results are screening evidence only.
+
 ## Repository layout
 
 ```text

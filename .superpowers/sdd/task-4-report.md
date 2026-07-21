@@ -1,85 +1,75 @@
-# Task 4 report: compression migration
+# Task 4 Report: Merge authoritative Orin results and document execution
 
-## Status
+## Result
 
-Completed and committed.
+Implemented `merge_jetson_metrics(rows, benchmark_path)`. It requires one matching `candidate_id`, updates only native hardware fields, and refreshes `candidates.csv` plus `manifest.json` in the benchmark JSON directory. The documentation now describes RTX screening, native Orin/TensorRT benchmarking, and the merge procedure. It explicitly states that only Orin data ranks final candidates.
 
-## Commit
+## RED
 
-`177cf339fc20d890d26baf3fbabd078789dc6c32` — `refactor: organize compression pipeline`
+Initial required command:
 
-## Files changed
+```powershell
+python -m pytest tests/unit/test_cluster_workflow.py -q
+```
 
-- `apps/compress.py`
-- `src/infrared_detection/compression/__init__.py`
-- `src/infrared_detection/compression/pruning/{__init__.py,dependency_graph.py,importance.py,yolo_pruner.py,legacy/__init__.py,legacy/fcpts_calibration.py,fcpts/__init__.py,fcpts/calibration.py,fcpts/yolo.py}`
-- `src/infrared_detection/compression/quantization/{__init__.py,low_precision_quantization.py}`
-- `src/infrared_detection/compression/distillation/{__init__.py,detection_kd.py}`
-- `src/infrared_detection/training/compression_matrix.py`
-- `tests/unit/test_compress_app.py`
-- `tests/unit/test_structured_pruning.py`
-- `tests/unit/test_fcpts_calibration.py`
-- `tests/unit/test_fcpts_representative_data.py`
-- `tests/unit/test_low_precision_quantization.py` (moved from `tests/test_low_precision_quantization.py`)
-- `tests/unit/test_detection_kd.py`
-- `tests/unit/test_compression_matrix.py`
-- `tests/integration/test_fcpts_yolov8_script.py`
+Result: failed before collection because `C:\Python314\python.exe` has no `pytest` module.
 
-## Tests and verification
+After creating the repository-local `.venv`, installing `pytest==9.0.2` and `PyYAML==6.0.3`, and installing the repository editable without dependencies, the RED command was:
 
-1. Red phase:
-   - Command: `.venv\\Scripts\\python.exe -m pytest tests\\unit\\test_compress_app.py -q`
-   - Result: expected collection failure, `ModuleNotFoundError: No module named 'apps.compress'`.
+```powershell
+& .\.venv\Scripts\python.exe -m pytest tests/unit/test_cluster_workflow.py -q
+```
 
-2. Final focused suite:
-   - Command: `.venv\\Scripts\\python.exe -m pytest tests\\unit\\test_compress_app.py tests\\unit\\test_structured_pruning.py tests\\unit\\test_fcpts_calibration.py tests\\unit\\test_fcpts_representative_data.py tests\\unit\\test_low_precision_quantization.py tests\\unit\\test_detection_kd.py tests\\unit\\test_compression_matrix.py tests\\integration\\test_fcpts_yolov8_script.py -q`
-   - Result: `19 passed in 15.67s` (exit 0).
+Result: failed during collection exactly as intended:
 
-3. App and syntax smoke test:
-   - Command: `.venv\\Scripts\\python.exe apps\\compress.py --help; .venv\\Scripts\\python.exe -m compileall -q src\\infrared_detection\\compression src\\infrared_detection\\training\\compression_matrix.py apps\\compress.py`
-   - Result: app help displayed `prune`, `quantize`, `distill`, and `matrix`; compile check exited 0.
+```text
+ImportError: cannot import name 'merge_jetson_metrics' from 'infrared_detection.evaluation.cluster_workflow'
+```
 
-4. Legacy-import scan:
-   - Command: `rg -n "src\\.python|from python|import python" src\\infrared_detection\\compression apps\\compress.py src\\infrared_detection\\training\\compression_matrix.py tests\\unit\\test_compress_app.py tests\\unit\\test_structured_pruning.py tests\\unit\\test_fcpts_calibration.py tests\\unit\\test_fcpts_representative_data.py tests\\unit\\test_low_precision_quantization.py tests\\unit\\test_detection_kd.py tests\\unit\\test_compression_matrix.py tests\\integration\\test_fcpts_yolov8_script.py`
-   - Result: no matches.
+## GREEN
+
+The new behavior test was run after implementation:
+
+```powershell
+& .\.venv\Scripts\python.exe -m pytest tests/unit/test_cluster_workflow.py::test_merge_orin_metrics_updates_only_hardware_fields -q
+```
+
+Result: `1 passed in 0.13s`.
+
+The requested focused suite was then run:
+
+```powershell
+& .\.venv\Scripts\python.exe -m pytest tests/unit/test_cluster_workflow.py tests/unit/test_jetson_benchmark_config.py tests/unit/test_evaluation_apps.py -q
+```
+
+Result: `11 passed, 4 failed`. The four failures are existing cluster-workflow paths that import the torch-dependent pruning validator before their assertions. The local verification environment deliberately contains only pytest and PyYAML. Root cause confirmed with:
+
+```powershell
+& .\.venv\Scripts\python.exe -c "from infrared_detection.evaluation.cluster_workflow import _validate_structural_reduction; _validate_structural_reduction({'parameter_count': 10, 'serialized_bytes': 4}, {'parameter_count': 8, 'serialized_bytes': 2})"
+```
+
+Result: `ModuleNotFoundError: No module named 'torch'` from `infrared_detection.compression.distillation.detection_kd`.
+
+## Changed files
+
+- `src/infrared_detection/evaluation/cluster_workflow.py`
+  - Added the constrained native hardware-field merge and artifact rewrite.
+- `tests/unit/test_cluster_workflow.py`
+  - Added the RED/GREEN merge test, including artifact persistence assertions.
+- `README.md`
+  - Added the cluster-pruning RTX-screening, Orin-native benchmark, candidate-ID annotation, and merge procedure.
+- `deploy/jetson/README.md`
+  - Added the required native-Orin benchmark and merge handoff for global candidates.
+
+## Self-review
+
+- The merge matches exactly one row by `candidate_id` and raises when the identifier is absent or ambiguous.
+- Only latency, FPS, peak memory, power, energy, and temperature keys are copied; mAP and serialized size are not copied.
+- Artifact regeneration uses the existing CSV writer and selection-manifest convention.
+- Documentation directs each native JSON into the experiment artifact directory so regeneration targets the correct `candidates.csv` and `manifest.json`.
+- The pre-existing untracked `docs/superpowers/plans/` directory was not modified.
 
 ## Concerns
 
-No functional blocker. The original untracked `src/python/optimisations/*` research sources were intentionally retained to preserve unrelated user work; the migrated package no longer imports from them. Their eventual cleanup is deferred to the repository-wide cleanup task.
-
-## Follow-up: compression dispatch fix
-
-### Status
-
-Completed and committed.
-
-### Follow-up commit
-
-`4a17063` — `fix: complete compression method dispatch`
-
-### Files changed
-
-- `apps/compress.py`
-- `tests/unit/test_compress_app.py`
-
-### Exact verification results
-
-1. App regression suite:
-   - Command: `.venv\\Scripts\\python.exe -m pytest tests\\unit\\test_compress_app.py -q`
-   - Result: `11 passed in 8.65s` (exit 0).
-
-2. Focused compression suite:
-   - Command: `.venv\\Scripts\\python.exe -m pytest tests\\unit\\test_compress_app.py tests\\unit\\test_structured_pruning.py tests\\unit\\test_fcpts_calibration.py tests\\unit\\test_fcpts_representative_data.py tests\\unit\\test_low_precision_quantization.py tests\\unit\\test_detection_kd.py tests\\unit\\test_compression_matrix.py tests\\integration\\test_fcpts_yolov8_script.py -q`
-   - Result: `29 passed in 14.82s` (exit 0).
-
-3. Lazy CLI-import smoke test:
-   - Command: `.venv\\Scripts\\python.exe apps\\compress.py --help`
-   - Result: exit 0; help lists `prune`, `quantize`, `distill`, and `matrix`.
-
-4. Syntax smoke test:
-   - Command: `.venv\\Scripts\\python.exe -m compileall -q apps\\compress.py tests\\unit\\test_compress_app.py`
-   - Result: exit 0.
-
-### Follow-up concerns
-
-The non-matrix CLI accepts only trusted PyTorch-serialised module/input files; loading untrusted pickle-based checkpoints is unsafe. The public `compress(model, config)` API remains the preferred integration interface.
+- Full focused-suite verification remains blocked locally until the project’s torch-dependent dependencies are installed. The new Task 4 merge test passes independently.
+- The native benchmark output must be annotated with the exact `candidate_id` before merging because the current native command-line interface does not receive a candidate identifier.

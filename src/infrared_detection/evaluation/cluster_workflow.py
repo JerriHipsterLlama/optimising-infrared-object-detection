@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import re
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
@@ -14,6 +15,17 @@ from infrared_detection.evaluation.cluster_candidates import classify_candidate,
 
 
 Metrics = dict[str, Any]
+
+_JETSON_HARDWARE_FIELDS = (
+    "latency_mean_ms",
+    "latency_p50_ms",
+    "latency_p95_ms",
+    "fps",
+    "peak_memory_mb",
+    "power_w",
+    "energy_mj_per_inference",
+    "temperature_c",
+)
 
 
 def run_structural_probe(model: Any, layer: str, cluster_size: int, ratio: float) -> Any:
@@ -131,6 +143,34 @@ def _write_artifacts(output_dir: Path, config_path: Path, rows: list[Metrics]) -
             "rows": rows,
         },
     )
+
+
+def merge_jetson_metrics(rows: list[Metrics], benchmark_path: Path) -> list[Metrics]:
+    """Merge authoritative native Jetson metrics and refresh experiment artifacts."""
+
+    path = Path(benchmark_path)
+    benchmark = json.loads(path.read_text(encoding="utf-8"))
+    candidate_id = benchmark.get("candidate_id")
+    if not isinstance(candidate_id, str) or not candidate_id:
+        raise ValueError("Native Jetson benchmark JSON must include a non-empty candidate_id.")
+
+    matches = [row for row in rows if row.get("candidate_id") == candidate_id]
+    if len(matches) != 1:
+        raise ValueError(f"Expected exactly one candidate row for {candidate_id!r}, found {len(matches)}.")
+
+    row = matches[0]
+    for field in _JETSON_HARDWARE_FIELDS:
+        if field in benchmark:
+            row[field] = benchmark[field]
+
+    output_dir = path.parent
+    config_path = output_dir / "cluster-workflow.yaml"
+    manifest_path = output_dir / "manifest.json"
+    if manifest_path.exists():
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        config_path = Path(manifest.get("config_path", config_path))
+    _write_artifacts(output_dir, config_path, rows)
+    return rows
 
 
 def _resolve_config(config_path: Path) -> tuple[dict[str, Any], Path, Path, Path]:
