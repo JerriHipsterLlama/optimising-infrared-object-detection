@@ -10,7 +10,7 @@ from typing import Any
 
 from infrared_detection.common.experiment_config import load_experiment_config, resolve_repo_path
 from infrared_detection.evaluation.artifacts import write_experiment_manifest, write_metrics_csv
-from infrared_detection.evaluation.cluster_candidates import classify_candidate
+from infrared_detection.evaluation.cluster_candidates import classify_candidate, select_cluster_candidates
 
 
 Metrics = dict[str, Any]
@@ -116,6 +116,7 @@ def _append_row(rows: list[Metrics], row: Metrics) -> None:
 
 
 def _write_artifacts(output_dir: Path, config_path: Path, rows: list[Metrics]) -> None:
+    winners = select_cluster_candidates(row for row in rows if row["stage"] == "global")
     write_metrics_csv(output_dir / "candidates.csv", rows)
     write_experiment_manifest(
         output_dir / "manifest.json",
@@ -123,6 +124,10 @@ def _write_artifacts(output_dir: Path, config_path: Path, rows: list[Metrics]) -
             "config_path": str(config_path),
             "candidate_count": len(rows),
             "candidate_ids": [row["candidate_id"] for row in rows],
+            "selected_candidate_ids": {
+                name: winner["candidate_id"] if winner is not None else None
+                for name, winner in winners.items()
+            },
             "rows": rows,
         },
     )
@@ -455,8 +460,22 @@ def _export_yolo(checkpoint: Any, config: Mapping[str, Any], output_dir: Path) -
     return Path(exported)
 
 
+def _is_jetson_orin_runtime() -> bool:
+    """Return whether this process can verify it is running on a Jetson Orin."""
+
+    try:
+        model = Path("/sys/firmware/devicetree/base/model").read_text(encoding="utf-8").lower()
+    except OSError:
+        return False
+    return "jetson" in model and "orin" in model
+
+
 def _profile_export(exported: Path, device: str) -> Metrics:
-    del device
+    if "orin" in device.lower() and not _is_jetson_orin_runtime():
+        raise RuntimeError(
+            "Refusing to label a local TensorRT profile as Orin without a verified Jetson Orin runtime. "
+            "Inject a remote Orin profiler or run this workflow on the target."
+        )
     from infrared_detection.benchmarking.jetson import benchmark_tensorrt_engine
 
     return benchmark_tensorrt_engine(exported)

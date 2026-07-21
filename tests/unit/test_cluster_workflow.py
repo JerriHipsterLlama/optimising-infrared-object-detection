@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
@@ -262,3 +263,57 @@ def test_candidate_artifact_must_match_the_baseline_export_format(tmp_path, adap
     assert baseline["artifact_format"] == "onnx"
     assert all(row["status"] == "failed" for row in probe_rows)
     assert all("format" in row["error"].lower() for row in probe_rows)
+
+
+def test_default_profiler_rejects_orin_target_without_verified_jetson_runtime(monkeypatch, tmp_path):
+    exported = tmp_path / "candidate.engine"
+    exported.write_bytes(b"engine")
+    monkeypatch.setattr(cluster_workflow, "_is_jetson_orin_runtime", lambda: False)
+
+    with pytest.raises(RuntimeError, match="Refusing to label.*Orin"):
+        cluster_workflow._profile_export(exported, "orin")
+
+
+def test_manifest_records_the_smallest_authoritative_global_winner(tmp_path, adapters):
+    checkpoints: dict[str, int] = {}
+
+    def fine_tune(model, config, output_dir):
+        del config
+        checkpoint = output_dir / "best.pt"
+        checkpoint.parent.mkdir(parents=True, exist_ok=True)
+        checkpoint.write_bytes(b"checkpoint")
+        checkpoints[str(checkpoint)] = model["cluster_size"]
+        return checkpoint
+
+    def reload_model(checkpoint):
+        return {"kind": "global", "cluster_size": checkpoints[str(checkpoint)]}
+
+    def evaluate(model, config, device):
+        del config
+        if model.get("kind") == "global":
+            return {**_metrics(0.499 if model["cluster_size"] == 16 else 0.495), "metric_device": device}
+        return {**_metrics(0.50), "metric_device": device}
+
+    def export(model_or_checkpoint, config, output_dir):
+        del model_or_checkpoint, config
+        output_dir.mkdir(parents=True, exist_ok=True)
+        artifact = output_dir / "candidate.onnx"
+        if output_dir.name == "baseline":
+            artifact.write_bytes(b"x" * 8)
+        elif "cluster-16" in output_dir.name:
+            artifact.write_bytes(b"x" * 2)
+        else:
+            artifact.write_bytes(b"x" * 4)
+        return artifact
+
+    adapters.fine_tune = fine_tune
+    adapters.reload_model = reload_model
+    adapters.evaluate = evaluate
+    adapters.export = export
+
+    rows = run_cluster_evaluation(write_config(tmp_path), adapters=adapters)
+
+    manifest = json.loads((tmp_path / "artifacts" / "manifest.json").read_text(encoding="utf-8"))
+    expected = "global-cluster-16-ratio-0.25"
+    assert any(row["candidate_id"] == expected and row["status"] == "primary_feasible" for row in rows)
+    assert manifest["selected_candidate_ids"] == {"primary": expected, "exploratory": None}

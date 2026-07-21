@@ -106,3 +106,42 @@ Remaining concerns:
 
 - The automated tests use injected adapters and artifact suffixes to validate orchestration and same-format comparisons. A physical Orin deployment must still perform the real export, profiling, and dataset evaluation on the target hardware.
 - The existing local-only TensorRT profiling adapter remains unsuitable for remote Orin measurements unless replaced or run on the Orin.
+
+## Review Findings: Profiler Provenance and Final Selection
+
+The default profiler now rejects an Orin-targeted request unless the local device-tree model verifies a Jetson Orin runtime; injected profile adapters remain available for unit tests and remote execution. The manifest now stores `selected_candidate_ids` for the primary and exploratory winners selected exclusively from classified global rows.
+
+TDD RED evidence:
+
+```text
+tests/unit/test_cluster_workflow.py::test_default_profiler_rejects_orin_target_without_verified_jetson_runtime
+1 failed in 0.19s
+AttributeError: module ...cluster_workflow has no attribute '_is_jetson_orin_runtime'
+
+tests/unit/test_cluster_workflow.py::test_manifest_records_the_smallest_authoritative_global_winner
+1 failed in 4.19s
+KeyError: 'selected_candidate_ids'
+```
+
+Focused GREEN evidence:
+
+```text
+tests/unit/test_cluster_workflow.py::test_default_profiler_rejects_orin_target_without_verified_jetson_runtime
+1 passed in 0.08s
+
+tests/unit/test_cluster_workflow.py::test_manifest_records_the_smallest_authoritative_global_winner
+1 passed in 4.19s
+```
+
+Exact final focused suite command and result:
+
+```text
+$env:PYTHONPATH = 'C:\Users\gerth\Documents\Engineering\optimising-infrared-object-detection-cluster-evaluation\src'
+C:\Users\gerth\Documents\Engineering\optimising-infrared-object-detection\.venv\Scripts\python.exe -m pytest tests/unit/test_cluster_workflow.py tests/integration/test_cluster_evaluation_app.py -q
+.............                                                            [100%]
+13 passed in 4.69s
+```
+
+Remaining concerns:
+
+- The default Orin guard verifies only the local Jetson Orin device-tree marker. Remote Orin profiling must use an injected adapter, and actual target execution remains hardware validation work.
