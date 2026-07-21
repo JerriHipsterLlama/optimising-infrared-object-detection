@@ -1,37 +1,147 @@
-# Task 3 Follow-up Report
+# Task 3 Report: Config-Driven Two-Stage Cluster Workflow
 
-Status: COMPLETE
+## Implementation
 
-Review commits: `3794f9e`, `e85d6be`, `319083f`, and `ed1100f`
+Implemented `run_cluster_evaluation(config_path, dry_run=False, adapters=None)` and the `ClusterEvaluationAdapters` dependency boundary. The workflow:
 
-Files changed:
+- plans a baseline, one-cluster RTX probes, and surviving global candidates from YAML;
+- keeps dry runs to YAML planning and artifact writing only, without invoking model, data, CUDA, TensorRT, or checkpoint adapters;
+- evaluates the baseline, preserves an explicit failure row for each failed probe/global candidate, and continues remaining candidates;
+- profiles successful probes on the RTX screening device and evaluates/profiles global candidates on the Orin target;
+- fine-tunes, reloads the reported best checkpoint, validates, exports, profiles, and classifies each successful global candidate;
+- writes `candidates.csv` through `write_metrics_csv` and `manifest.json` through `write_experiment_manifest`;
+- guarantees distinct candidate IDs, including when a configuration repeats a candidate shape.
 
-- `apps/train.py`
-- `src/infrared_detection/models/yolov8/training.py`
-- `tests/integration/test_train_yolov8_config.py`
-- `src/infrared_detection/models/faster_rcnn/training.py`
-- `tools/plot_faster_rcnn_metrics.py`
-- `.superpowers/sdd/task-3-report.md`
+The CLI app accepts `--config` and `--dry-run`, and the supplied YAML declares the checkpoint, dataset YAML, image size, seed, protected/safe layers, cluster sizes, probe/global ratios, short fine-tune duration, output directory, RTX screening device, and Orin target.
 
-Exact test commands and results:
+## Changed Files
 
-- `.venv\Scripts\python.exe -m pytest tests\integration\test_train_yolov8_config.py -q` — PASS (`7 passed in 7.20s`). This includes subprocess integration tests for both subcommands with stubbed trainer modules; each starts without `src/` on `sys.path`, confirms the app bootstrap adds it, and validates complete argument forwarding.
-- `python apps\train.py --help` — PASS (exit code 0; lists `yolov8` and `faster-rcnn`).
-- `.venv\Scripts\python.exe -c "import runpy; runpy.run_path('apps/train.py', run_name='train_app'); from infrared_detection.models.yolov8.training import train_yolov8; from infrared_detection.models.faster_rcnn.training import train_faster_rcnn; print('bootstrapped trainer imports pass')"` — PASS (`bootstrapped trainer imports pass`).
-- `.venv\Scripts\python.exe apps\train.py yolov8 --config configs\yolov8_config.yaml --dry-run` — PASS (validated the 19,400-image training and 4,286-image validation splits; no training started).
-- `.venv\Scripts\python.exe apps\train.py yolov8 --help` — PASS (exit code 0; shows config, epoch, batch-size, image-size, resume, device, seed, data, project, name, and dry-run options).
-- `.venv\Scripts\python.exe apps\train.py faster-rcnn --help` — PASS (exit code 0; shows config, epoch, batch-size, resume, checkpoint, name, and no-augment options).
-- `.venv\Scripts\python.exe -m pytest tests/integration/test_train_yolov8_config.py -q` — PASS (exit code 0; `7 passed in 7.00s`).
-- `git diff --check` — PASS (exit code 0; no whitespace errors; Git emitted only expected LF-to-CRLF normalization warnings for touched files).
+- `src/infrared_detection/evaluation/cluster_workflow.py`
+- `apps/evaluate_cluster_pruning.py`
+- `configs/experiments/cluster_pruning_evaluation.yaml`
+- `tests/unit/test_cluster_workflow.py`
+- `tests/integration/test_cluster_evaluation_app.py`
 
-Final verification against Task 3 base `02a81f4de7c99f30e8098b8c7b7b9307e45744fc`:
+## RED Evidence
 
-- `git diff --check 02a81f4de7c99f30e8098b8c7b7b9307e45744fc ed1100f` — PASS (exit code 0; no whitespace errors).
+The requested system-Python command could not collect tests because its Python installation does not contain pytest:
 
-- `git diff --check 02a81f4de7c99f30e8098b8c7b7b9307e45744fc` — PASS (exit code 0; no whitespace errors; Git emitted LF-to-CRLF normalization warnings for `requirements.txt`, `.superpowers/sdd/task-3-report.md`, and `src/infrared_detection/models/yolov8/training.py`).
-- `.venv\Scripts\python.exe -m pytest tests/integration/test_train_yolov8_config.py -q` — PASS (exit code 0; `7 passed in 4.82s`).
+```text
+python -m pytest tests/unit/test_cluster_workflow.py tests/integration/test_cluster_evaluation_app.py -q
+Exit code: 1
+C:\Python314\python.exe: No module named pytest
+```
 
-Concerns:
+Using the available project virtual environment with this branch's `src` first on `PYTHONPATH`, the initial RED command failed for the intended reason:
 
-- The bare `python` interpreter used for the required root-level help check lacks the project runtime dependency `numpy`. Consequently, `python -c "... import infrared_detection.models.yolov8.training ..."` fails at `import numpy`, after the app bootstrap has made `src/` importable. The project virtual environment contains the dependencies and all real-import/no-training verification above passed there.
-- Existing unrelated user modifications and untracked research files remain unstaged and will be excluded from the follow-up commit.
+```text
+..\optimising-infrared-object-detection\.venv\Scripts\python.exe -m pytest tests/unit/test_cluster_workflow.py tests/integration/test_cluster_evaluation_app.py -q
+Exit code: 1
+ImportError: cannot import name 'cluster_workflow' from 'infrared_detection.evaluation'
+```
+
+After the first GREEN cycle, a self-review exposed missing RTX profiling for probe rows. A test was added first and failed as expected:
+
+```text
+Exit code: 1
+1 failed, 3 passed
+KeyError: 'latency_p50_ms'
+```
+
+## GREEN Evidence
+
+Final focused verification used:
+
+```text
+$env:PYTHONPATH = (Join-Path (Get-Location) 'src')
+..\optimising-infrared-object-detection\.venv\Scripts\python.exe -m pytest tests/unit/test_cluster_workflow.py tests/integration/test_cluster_evaluation_app.py -q
+....                                                                     [100%]
+4 passed in 0.24s
+```
+
+Additional final checks passed:
+
+```text
+git diff --check
+..\optimising-infrared-object-detection\.venv\Scripts\python.exe -m py_compile src\infrared_detection\evaluation\cluster_workflow.py apps\evaluate_cluster_pruning.py
+..\optimising-infrared-object-detection\.venv\Scripts\python.exe -c "import yaml; ... validate cluster_pruning_evaluation.yaml"
+```
+
+## Self-Review
+
+- Verified dry-run uses `_planned_rows` and writes artifacts before adapters are constructed or called.
+- Verified failures are caught independently for probes and globals, while the baseline row is retained.
+- Added de-duplication at row insertion so candidate IDs remain unique even for repeated/sanitized configuration values.
+- Verified probes use RTX profiling and global rows use the Orin target before classification.
+- Kept tests focused on orchestration behavior through injected adapters; they do not require checkpoints, data, CUDA, TensorRT, or Ultralytics execution.
+- No code-review subagent capability was available in this session, so review was performed directly against the requirements and the exact changed files.
+
+## Concerns
+
+- The default TensorRT profiler is local-only; an actual Orin deployment needs an injected remote/Jetson-capable profiling adapter (or execution on the Orin). The workflow records such adapter failures per candidate rather than aborting the experiment.
+- Full infrared-data training and physical TensorRT/Orin measurements remain hardware/manual validation work; the automated suite deliberately exercises the injected-adapter orchestration contract.
+
+## Corrective Pass: Final Verification
+
+Exact final focused test command and result:
+
+```text
+$env:PYTHONPATH = 'C:\Users\gerth\Documents\Engineering\optimising-infrared-object-detection-cluster-evaluation\src'
+C:\Users\gerth\Documents\Engineering\optimising-infrared-object-detection\.venv\Scripts\python.exe -m pytest tests/unit/test_cluster_workflow.py tests/integration/test_cluster_evaluation_app.py -q
+...........                                                              [100%]
+11 passed in 4.67s
+```
+
+Additional TDD regression results:
+
+```text
+tests/unit/test_cluster_workflow.py::test_each_preplanned_row_is_resolved_when_safe_layers_or_candidate_shapes_repeat
+1 passed in 5.45s
+
+tests/unit/test_cluster_workflow.py::test_candidate_artifact_must_match_the_baseline_export_format
+1 passed in 0.10s
+```
+
+Remaining concerns:
+
+- The automated tests use injected adapters and artifact suffixes to validate orchestration and same-format comparisons. A physical Orin deployment must still perform the real export, profiling, and dataset evaluation on the target hardware.
+- The existing local-only TensorRT profiling adapter remains unsuitable for remote Orin measurements unless replaced or run on the Orin.
+
+## Review Findings: Profiler Provenance and Final Selection
+
+The default profiler now rejects an Orin-targeted request unless the local device-tree model verifies a Jetson Orin runtime; injected profile adapters remain available for unit tests and remote execution. The manifest now stores `selected_candidate_ids` for the primary and exploratory winners selected exclusively from classified global rows.
+
+TDD RED evidence:
+
+```text
+tests/unit/test_cluster_workflow.py::test_default_profiler_rejects_orin_target_without_verified_jetson_runtime
+1 failed in 0.19s
+AttributeError: module ...cluster_workflow has no attribute '_is_jetson_orin_runtime'
+
+tests/unit/test_cluster_workflow.py::test_manifest_records_the_smallest_authoritative_global_winner
+1 failed in 4.19s
+KeyError: 'selected_candidate_ids'
+```
+
+Focused GREEN evidence:
+
+```text
+tests/unit/test_cluster_workflow.py::test_default_profiler_rejects_orin_target_without_verified_jetson_runtime
+1 passed in 0.08s
+
+tests/unit/test_cluster_workflow.py::test_manifest_records_the_smallest_authoritative_global_winner
+1 passed in 4.19s
+```
+
+Exact final focused suite command and result:
+
+```text
+$env:PYTHONPATH = 'C:\Users\gerth\Documents\Engineering\optimising-infrared-object-detection-cluster-evaluation\src'
+C:\Users\gerth\Documents\Engineering\optimising-infrared-object-detection\.venv\Scripts\python.exe -m pytest tests/unit/test_cluster_workflow.py tests/integration/test_cluster_evaluation_app.py -q
+.............                                                            [100%]
+13 passed in 4.69s
+```
+
+Remaining concerns:
+
+- The default Orin guard verifies only the local Jetson Orin device-tree marker. Remote Orin profiling must use an injected adapter, and actual target execution remains hardware validation work.

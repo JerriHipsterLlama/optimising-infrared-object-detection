@@ -7,6 +7,8 @@ consolidated.
 """
 
 from .dependency_graph import DependencyGraph, build_yolo_dependency_graph
+from .cluster_selection import ClusterSpec, plan_low_importance_clusters
+from .cluster_probe import make_keep_mask, run_structural_probe
 from .fcpts import CalibrationRunner, DifferentiablePruningMaskFn, calibrate_model, finalize_and_export
 from .importance import compute_channel_importance
 from .yolo_pruner import prune_yolo_channels, validate_structural_reduction
@@ -14,6 +16,10 @@ from .yolo_pruner import prune_yolo_channels, validate_structural_reduction
 __all__ = [
     "DependencyGraph",
     "build_yolo_dependency_graph",
+    "ClusterSpec",
+    "plan_low_importance_clusters",
+    "make_keep_mask",
+    "run_structural_probe",
     "CalibrationRunner",
     "DifferentiablePruningMaskFn",
     "calibrate_model",
