@@ -18,6 +18,17 @@ def test_classification_uses_absolute_map50_95_limits(candidate, status):
     assert classify_candidate(0.50, candidate) == status
 
 
+@pytest.mark.parametrize(
+    ("baseline", "candidate", "status"),
+    [
+        (0.0102, 0.0002, "primary_feasible"),
+        (0.0202, 0.0002, "exploratory_feasible"),
+    ],
+)
+def test_classification_keeps_exact_decimal_drop_boundaries_inclusive(baseline, candidate, status):
+    assert classify_candidate(baseline, candidate) == status
+
+
 def test_primary_winner_is_smallest_then_fastest_on_orin():
     rows = [
         {
@@ -65,3 +76,22 @@ def test_exploratory_winner_is_selected_separately():
         "primary": None,
         "exploratory": exploratory,
     }
+
+
+def test_full_ranking_ties_use_candidate_id():
+    higher_id = {
+        "candidate_id": "cluster-32",
+        "status": "primary_feasible",
+        "serialized_bytes": 100,
+        "latency_p50_ms": 8.0,
+        "map50_95": 0.49,
+    }
+    lower_id = {
+        "candidate_id": "cluster-16",
+        "status": "primary_feasible",
+        "serialized_bytes": 100,
+        "latency_p50_ms": 8.0,
+        "map50_95": 0.49,
+    }
+
+    assert select_cluster_candidates([higher_id, lower_id])["primary"] is lower_id

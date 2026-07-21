@@ -1,18 +1,20 @@
 """Classification and deterministic selection for cluster-pruning candidates."""
 
 from collections.abc import Iterable, Mapping
+from decimal import Decimal
 
 
 def classify_candidate(baseline_map50_95: float, candidate_map50_95: float) -> str:
     """Classify a candidate by its absolute mAP50-95 drop from baseline."""
-    if candidate_map50_95 >= baseline_map50_95 - 0.01:
+    drop = Decimal(str(baseline_map50_95)) - Decimal(str(candidate_map50_95))
+    if drop <= Decimal("0.01"):
         return "primary_feasible"
-    if candidate_map50_95 >= baseline_map50_95 - 0.02:
+    if drop <= Decimal("0.02"):
         return "exploratory_feasible"
     return "rejected_accuracy"
 
 
-def _candidate_sort_key(row: Mapping[str, object]) -> tuple[object, int, float, float]:
+def _candidate_sort_key(row: Mapping[str, object]) -> tuple[object, int, float, float, str]:
     latency = row.get("latency_p50_ms")
     has_latency = latency is not None
     return (
@@ -20,6 +22,7 @@ def _candidate_sort_key(row: Mapping[str, object]) -> tuple[object, int, float, 
         0 if has_latency else 1,
         float(latency) if has_latency else 0.0,
         -float(row["map50_95"]),
+        str(row.get("candidate_id", "")),
     )
 
 
