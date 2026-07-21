@@ -16,6 +16,8 @@ from infrared_detection.evaluation.cluster_candidates import classify_candidate,
 
 Metrics = dict[str, Any]
 
+_ORIN_TARGET = "jetson_orin_nano"
+_FEASIBLE_STATUSES = frozenset({"primary_feasible", "exploratory_feasible"})
 _JETSON_HARDWARE_FIELDS = (
     "latency_mean_ms",
     "latency_p50_ms",
@@ -113,6 +115,7 @@ def _base_row(
         "target_device": None,
         "evaluation_device": None,
         "profile_device": None,
+        "hardware_benchmarked": False,
         "reason": None,
     }
 
@@ -128,7 +131,13 @@ def _append_row(rows: list[Metrics], row: Metrics) -> None:
 
 
 def _write_artifacts(output_dir: Path, config_path: Path, rows: list[Metrics]) -> None:
-    winners = select_cluster_candidates(row for row in rows if row["stage"] == "global")
+    winners = select_cluster_candidates(
+        row
+        for row in rows
+        if row.get("stage") == "global"
+        and row.get("hardware_benchmarked") is True
+        and row.get("status") in _FEASIBLE_STATUSES
+    )
     write_metrics_csv(output_dir / "candidates.csv", rows)
     write_experiment_manifest(
         output_dir / "manifest.json",
@@ -153,6 +162,8 @@ def merge_jetson_metrics(rows: list[Metrics], benchmark_path: Path) -> list[Metr
     candidate_id = benchmark.get("candidate_id")
     if not isinstance(candidate_id, str) or not candidate_id:
         raise ValueError("Native Jetson benchmark JSON must include a non-empty candidate_id.")
+    if benchmark.get("device") != _ORIN_TARGET and benchmark.get("target") != _ORIN_TARGET:
+        raise ValueError("Native Jetson benchmark JSON must identify device or target as jetson_orin_nano.")
 
     matches = [row for row in rows if row.get("candidate_id") == candidate_id]
     if len(matches) != 1:
@@ -162,6 +173,20 @@ def merge_jetson_metrics(rows: list[Metrics], benchmark_path: Path) -> list[Metr
     for field in _JETSON_HARDWARE_FIELDS:
         if field in benchmark:
             row[field] = benchmark[field]
+    row["hardware_benchmarked"] = True
+    row["profile_device"] = _ORIN_TARGET
+
+    if row.get("stage") == "global" and row.get("map50_95") is not None:
+        baseline = next(
+            (
+                candidate
+                for candidate in rows
+                if candidate.get("stage") == "baseline" and candidate.get("map50_95") is not None
+            ),
+            None,
+        )
+        if baseline is not None:
+            row["status"] = classify_candidate(float(baseline["map50_95"]), float(row["map50_95"]))
 
     output_dir = path.parent
     config_path = output_dir / "cluster-workflow.yaml"

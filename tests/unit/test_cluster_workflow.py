@@ -279,7 +279,7 @@ def test_default_profiler_rejects_orin_target_without_verified_jetson_runtime(mo
         cluster_workflow._profile_export(exported, "orin")
 
 
-def test_manifest_records_the_smallest_authoritative_global_winner(tmp_path, adapters):
+def test_manifest_waits_for_authoritative_orin_global_winner(tmp_path, adapters):
     checkpoints: dict[str, int] = {}
 
     def fine_tune(model, config, output_dir):
@@ -315,13 +315,17 @@ def test_manifest_records_the_smallest_authoritative_global_winner(tmp_path, ada
     adapters.reload_model = reload_model
     adapters.evaluate = evaluate
     adapters.export = export
+    adapters.validate_reduction = lambda before, after: {
+        "parameter_count_reduction": 1.0 - float(after["parameter_count"]) / float(before["parameter_count"]),
+        "serialized_reduction": 1.0 - float(after["serialized_bytes"]) / float(before["serialized_bytes"]),
+    }
 
     rows = run_cluster_evaluation(write_config(tmp_path), adapters=adapters)
 
     manifest = json.loads((tmp_path / "artifacts" / "manifest.json").read_text(encoding="utf-8"))
     expected = "global-cluster-16-ratio-0.25"
     assert any(row["candidate_id"] == expected and row["status"] == "primary_feasible" for row in rows)
-    assert manifest["selected_candidate_ids"] == {"primary": expected, "exploratory": None}
+    assert manifest["selected_candidate_ids"] == {"primary": None, "exploratory": None}
 
 
 def test_merge_orin_metrics_updates_only_hardware_fields(tmp_path):
@@ -345,6 +349,7 @@ def test_merge_orin_metrics_updates_only_hardware_fields(tmp_path):
         tmp_path / "orin.json",
         {
             "candidate_id": "global-c4-r0.20",
+            "device": "jetson_orin_nano",
             "map50_95": 0.1,
             "serialized_bytes": 1,
             "latency_p50_ms": 8.1,
@@ -363,6 +368,66 @@ def test_merge_orin_metrics_updates_only_hardware_fields(tmp_path):
     assert merged[0]["serialized_bytes"] == 1234
     assert merged[0]["latency_p50_ms"] == 8.1
     assert merged[0]["temperature_c"] == 48.2
+    assert merged[0]["hardware_benchmarked"] is True
+    assert merged[0]["profile_device"] == "jetson_orin_nano"
     assert "8.1" in (tmp_path / "candidates.csv").read_text(encoding="utf-8")
     manifest = json.loads((tmp_path / "manifest.json").read_text(encoding="utf-8"))
     assert manifest["selected_candidate_ids"] == {"primary": "global-c4-r0.20", "exploratory": None}
+
+
+@pytest.mark.parametrize("provenance", [{}, {"device": "rtx"}, {"target": "jetson_orin_nano_devkit"}])
+def test_merge_jetson_metrics_rejects_missing_or_wrong_orin_provenance(tmp_path, provenance):
+    rows = [{"candidate_id": "global-c4-r0.20", "stage": "global", "status": "failed"}]
+    benchmark = write_json(
+        tmp_path / "orin.json",
+        {"candidate_id": "global-c4-r0.20", **provenance},
+    )
+
+    with pytest.raises(ValueError, match="jetson_orin_nano"):
+        merge_jetson_metrics(rows, benchmark)
+
+
+def test_valid_orin_merge_reclassifies_failed_global_and_selects_only_benchmarked_rows(tmp_path):
+    rows = [
+        {"candidate_id": "baseline", "stage": "baseline", "map50_95": 0.50, "serialized_bytes": 1000},
+        {
+            "candidate_id": "global-failed",
+            "stage": "global",
+            "status": "failed",
+            "map50_95": 0.495,
+            "serialized_bytes": 500,
+            "hardware_benchmarked": False,
+        },
+        {
+            "candidate_id": "global-unbenchmarked",
+            "stage": "global",
+            "status": "primary_feasible",
+            "map50_95": 0.499,
+            "serialized_bytes": 1,
+            "hardware_benchmarked": False,
+        },
+        {
+            "candidate_id": "probe-feasible",
+            "stage": "probe",
+            "status": "primary_feasible",
+            "map50_95": 0.50,
+            "serialized_bytes": 1,
+            "hardware_benchmarked": True,
+        },
+    ]
+    benchmark = write_json(
+        tmp_path / "orin.json",
+        {
+            "candidate_id": "global-failed",
+            "device": "jetson_orin_nano",
+            "latency_p50_ms": 8.1,
+        },
+    )
+
+    merged = merge_jetson_metrics(rows, benchmark)
+
+    failed = next(row for row in merged if row["candidate_id"] == "global-failed")
+    assert failed["status"] == "primary_feasible"
+    assert failed["hardware_benchmarked"] is True
+    manifest = json.loads((tmp_path / "manifest.json").read_text(encoding="utf-8"))
+    assert manifest["selected_candidate_ids"] == {"primary": "global-failed", "exploratory": None}

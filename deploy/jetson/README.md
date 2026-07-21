@@ -35,10 +35,45 @@ Keep Jetson power mode, clocks, JetPack, CUDA, TensorRT, OpenCV, input resolutio
 
 The RTX host uses probe measurements only to screen cluster sizes. Final global candidates must be benchmarked on this Orin with their actual TensorRT engines; do not use RTX timing to rank them.
 
+Build the native runner and a candidate TensorRT engine on the Orin:
+
+```bash
+cmake -S deploy/jetson -B build/jetson
+cmake --build build/jetson --config Release -j2
+trtexec \
+  --onnx=runs/experiments/cluster_pruning_evaluation/global-cluster-16-ratio-0.20/candidate.onnx \
+  --saveEngine=runs/experiments/cluster_pruning_evaluation/global-cluster-16-ratio-0.20/candidate.engine \
+  --fp16 --workspace=1024 --verbose
+```
+
+Run the actual candidate engine with fixed batch-1 settings:
+
+```bash
+./build/jetson/jetson_benchmark \
+  --engine runs/experiments/cluster_pruning_evaluation/global-cluster-16-ratio-0.20/candidate.engine \
+  --input-dir data/camel/images/test --warmup 20 --iterations 100 \
+  --output-json runs/experiments/cluster_pruning_evaluation/orin-global-cluster-16-ratio-0.20.json
+tegrastats --interval 1000 --logfile runs/experiments/cluster_pruning_evaluation/tegrastats-global-cluster-16-ratio-0.20.log
+```
+
 For each global candidate, place the native JSON in the corresponding cluster-evaluation artifact directory and add its exact `candidate_id`:
 
 ```bash
 python3 -c "import json; p='runs/experiments/cluster_pruning_evaluation/orin-global-cluster-16-ratio-0.20.json'; data=json.load(open(p)); data['candidate_id']='global-cluster-16-ratio-0.2'; open(p, 'w').write(json.dumps(data, indent=2) + '\\n')"
 ```
 
-Copy the JSON back to the host and run the documented `merge_jetson_metrics` command from the repository README. The merge preserves Python validation mAP and serialized-size fields, replaces only native hardware metrics, and regenerates `candidates.csv` plus `manifest.json`. Merge every final candidate before selecting a winner: only Orin data ranks final candidates.
+Complete the JSON from the tegrastats log with this supplemental schema before returning it to the host. The provenance value is mandatory and exact:
+
+```json
+{
+  "candidate_id": "global-cluster-16-ratio-0.2",
+  "device": "jetson_orin_nano",
+  "target": "jetson_orin_nano",
+  "peak_memory_mb": 742.0,
+  "power_w": 8.4,
+  "energy_mj_per_inference": 70.8,
+  "temperature_c": 52.0
+}
+```
+
+Copy the completed JSON back to the host and run the documented `merge_jetson_metrics` command from the repository README. The merge rejects missing or wrong Orin provenance, marks the matched row hardware-benchmarked, reclassifies it from its validation mAP against baseline, preserves mAP and serialized-size fields, and regenerates `candidates.csv` plus `manifest.json`. Final winner selection waits for this valid merge: only Orin data ranks final candidates.

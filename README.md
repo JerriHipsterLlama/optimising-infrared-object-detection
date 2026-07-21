@@ -69,10 +69,51 @@ python apps/evaluate_cluster_pruning.py --config configs/experiments/cluster_pru
 
 The workflow writes `candidates.csv` and `manifest.json` under the configured `runs/experiments/cluster_pruning_evaluation/` directory. Transfer each surviving global candidate's TensorRT engine to the Orin, build it there if necessary, and measure it with the native benchmark in `deploy/jetson/`. Write each native result back into that same experiment directory, using a distinct filename such as `orin-global-cluster-16-ratio-0.20.json`.
 
+On the Orin, build an engine from a candidate ONNX export when an engine was not transferred:
+
+```bash
+trtexec \
+  --onnx=runs/experiments/cluster_pruning_evaluation/global-cluster-16-ratio-0.20/candidate.onnx \
+  --saveEngine=runs/experiments/cluster_pruning_evaluation/global-cluster-16-ratio-0.20/candidate.engine \
+  --fp16 --workspace=1024 --verbose
+```
+
+Then run the native batch-1 benchmark against that actual engine:
+
+```bash
+./build/jetson/jetson_benchmark \
+  --engine runs/experiments/cluster_pruning_evaluation/global-cluster-16-ratio-0.20/candidate.engine \
+  --input-dir data/camel/images/test --warmup 20 --iterations 100 \
+  --output-json runs/experiments/cluster_pruning_evaluation/orin-global-cluster-16-ratio-0.20.json
+```
+
 The native JSON must be annotated with the candidate identifier before it is merged. For example, on the Orin:
 
 ```bash
 python3 -c "import json; p='runs/experiments/cluster_pruning_evaluation/orin-global-cluster-16-ratio-0.20.json'; data=json.load(open(p)); data['candidate_id']='global-cluster-16-ratio-0.2'; open(p, 'w').write(json.dumps(data, indent=2) + '\\n')"
+```
+
+Add the tegrastats handoff fields to the same JSON before copying it to the host. The merge accepts this explicit schema; `device` or `target` must be exactly `jetson_orin_nano`:
+
+```json
+{
+  "candidate_id": "global-cluster-16-ratio-0.2",
+  "device": "jetson_orin_nano",
+  "target": "jetson_orin_nano",
+  "latency_p50_ms": 8.1,
+  "latency_p95_ms": 8.6,
+  "fps": 118.7,
+  "peak_memory_mb": 742.0,
+  "power_w": 8.4,
+  "energy_mj_per_inference": 70.8,
+  "temperature_c": 52.0
+}
+```
+
+Capture the supplemental values during the native run, keeping the raw handoff beside the JSON:
+
+```bash
+tegrastats --interval 1000 --logfile runs/experiments/cluster_pruning_evaluation/tegrastats-global-cluster-16-ratio-0.20.log
 ```
 
 After transferring that JSON to the experiment directory, merge it on the host. The merge updates only native hardware fields (`latency_*`, FPS, memory, power, energy, and temperature); validation mAP and serialized-size fields remain unchanged. It rewrites both `candidates.csv` and `manifest.json`.
@@ -81,7 +122,7 @@ After transferring that JSON to the experiment directory, merge it on the host. 
 python -c "import json; from pathlib import Path; from infrared_detection.evaluation.cluster_workflow import merge_jetson_metrics; output=Path('runs/experiments/cluster_pruning_evaluation'); merge_jetson_metrics(json.loads((output / 'manifest.json').read_text(encoding='utf-8'))['rows'], output / 'orin-global-cluster-16-ratio-0.20.json')"
 ```
 
-Merge native results for every final global candidate before reading `selected_candidate_ids` from the manifest. Only measured Orin results rank final candidates; RTX results are screening evidence only.
+Merge native results for every final global candidate before reading `selected_candidate_ids` from the manifest. The manifest remains unselected until a valid Orin-provenance merge marks a feasible global row as hardware-benchmarked. Only measured Orin results rank final candidates; RTX results are screening evidence only.
 
 ## Repository layout
 

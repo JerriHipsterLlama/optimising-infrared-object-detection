@@ -73,3 +73,29 @@ Result: `ModuleNotFoundError: No module named 'torch'` from `infrared_detection.
 
 - Full focused-suite verification remains blocked locally until the project’s torch-dependent dependencies are installed. The new Task 4 merge test passes independently.
 - The native benchmark output must be annotated with the exact `candidate_id` before merging because the current native command-line interface does not receive a candidate identifier.
+
+## Final corrective verification
+
+The corrective tests were first run in RED:
+
+```powershell
+& .\.venv\Scripts\python.exe -m pytest tests/unit/test_cluster_workflow.py::test_merge_jetson_metrics_rejects_missing_or_wrong_orin_provenance tests/unit/test_cluster_workflow.py::test_valid_orin_merge_reclassifies_failed_global_and_selects_only_benchmarked_rows -q
+```
+
+Result: `4 failed in 0.28s` as expected before the provenance and Orin-gated selection implementation: the three provenance cases did not raise, and the failed global row remained failed.
+
+The final Task 4 relevant tests were run with:
+
+```powershell
+& .\.venv\Scripts\python.exe -m pytest tests/unit/test_cluster_workflow.py -k "merge_orin_metrics or merge_jetson_metrics or valid_orin_merge or manifest_waits_for_authoritative_orin_global_winner" tests/unit/test_jetson_benchmark_config.py tests/unit/test_evaluation_apps.py -q
+```
+
+Result: `6 passed, 13 deselected in 0.17s`.
+
+The complete requested Task 4 suite was also run:
+
+```powershell
+& .\.venv\Scripts\python.exe -m pytest tests/unit/test_cluster_workflow.py tests/unit/test_jetson_benchmark_config.py tests/unit/test_evaluation_apps.py -q
+```
+
+Result: `16 passed, 3 failed in 1.08s`. The remaining failures are `test_successful_probes_are_profiled_on_rtx_before_global_orin_evaluation`, `test_baseline_and_global_metrics_preserve_authoritative_orin_provenance`, and `test_same_format_baseline_artifact_and_physical_reduction_are_required`; they depend on the project’s torch-based pruning validation stack, which is absent from the shared venv. No full-green claim is made.
