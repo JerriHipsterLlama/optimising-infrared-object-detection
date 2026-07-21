@@ -50,3 +50,22 @@ def test_probe_surfaces_dependency_rejection(monkeypatch, tiny_model):
         run_structural_probe(
             tiny_model, torch.randn(1, 3, 32, 32), ClusterSpec("conv", 2, (0, 1))
         )
+
+
+def test_probe_rejects_known_detection_head_before_building_graph(monkeypatch, tiny_model):
+    def unexpected_graph(*args, **kwargs):
+        pytest.fail("detection-head probe must be rejected before graph construction")
+
+    monkeypatch.setattr(cluster_probe, "build_yolo_dependency_graph", unexpected_graph)
+
+    with pytest.raises(ValueError, match="detection head"):
+        run_structural_probe(
+            tiny_model, torch.randn(1, 3, 32, 32), ClusterSpec("model.22.cv3", 2, (0, 1))
+        )
+
+
+def test_probe_rejects_removing_every_output_channel(tiny_model):
+    with pytest.raises(ValueError, match="removes every output channel"):
+        run_structural_probe(
+            tiny_model, torch.randn(1, 3, 32, 32), ClusterSpec("conv", 4, (0, 1, 2, 3))
+        )

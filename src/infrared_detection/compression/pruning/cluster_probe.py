@@ -9,6 +9,8 @@ from .cluster_selection import ClusterSpec
 from .dependency_graph import build_yolo_dependency_graph
 from .yolo_pruner import prune_yolo_channels
 
+_YOLO_DETECTION_HEAD_PREFIX = "model.22"
+
 
 def make_keep_mask(output_channels: int, prune_indices: tuple[int, ...]) -> torch.Tensor:
     """Return a boolean mask that removes exactly ``prune_indices``."""
@@ -21,6 +23,10 @@ def make_keep_mask(output_channels: int, prune_indices: tuple[int, ...]) -> torc
 def run_structural_probe(model: nn.Module, example_input: torch.Tensor, spec: ClusterSpec) -> nn.Module:
     """Physically prune one candidate cluster through a fresh dependency graph."""
 
+    if spec.layer_name == _YOLO_DETECTION_HEAD_PREFIX or spec.layer_name.startswith(
+        f"{_YOLO_DETECTION_HEAD_PREFIX}."
+    ):
+        raise ValueError(f"Structural probes cannot target detection head module {spec.layer_name}.")
     graph = build_yolo_dependency_graph(model, example_input)
     module = graph.modules[spec.layer_name]
     output_channels = module.out_channels if isinstance(module, nn.Conv2d) else module.out_features
