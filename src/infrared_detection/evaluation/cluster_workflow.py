@@ -42,6 +42,8 @@ class ClusterEvaluationAdapters:
     export: Callable[[Any, Mapping[str, Any], Path], Path]
     profile: Callable[[Path, str], Metrics]
     stats: Callable[[Any], Metrics]
+    artifact_stats: Callable[[Path], Metrics] | None = None
+    validate_reduction: Callable[[Mapping[str, Any], Mapping[str, Any]], Metrics] | None = None
 
     @classmethod
     def defaults(cls, config: Mapping[str, Any]) -> "ClusterEvaluationAdapters":
@@ -58,6 +60,8 @@ class ClusterEvaluationAdapters:
             export=_export_yolo,
             profile=_profile_export,
             stats=_collect_stats,
+            artifact_stats=_artifact_stats,
+            validate_reduction=_validate_structural_reduction,
         )
 
 
@@ -76,10 +80,17 @@ def _candidate_id(stage: str, *, layer: str | None = None, cluster_size: int | N
     return "-".join(parts)
 
 
-def _base_row(candidate_id: str, stage: str, cluster_size: int | None = None, ratio: float | None = None) -> Metrics:
+def _base_row(
+    candidate_id: str,
+    stage: str,
+    cluster_size: int | None = None,
+    ratio: float | None = None,
+    layer: str | None = None,
+) -> Metrics:
     return {
         "candidate_id": candidate_id,
         "stage": stage,
+        "layer": layer,
         "cluster_size": cluster_size,
         "prune_ratio": ratio,
         "status": "planned",
@@ -88,6 +99,9 @@ def _base_row(candidate_id: str, stage: str, cluster_size: int | None = None, ra
         "exported_path": None,
         "screening_device": None,
         "target_device": None,
+        "evaluation_device": None,
+        "profile_device": None,
+        "reason": None,
     }
 
 
@@ -128,7 +142,17 @@ def _planned_rows(config: Mapping[str, Any]) -> list[Metrics]:
     _append_row(rows, _base_row("baseline", "baseline", ratio=0.0))
     for layer in pruning["safe_layers"]:
         for size in pruning["cluster_sizes"]:
-            _append_row(rows, _base_row(_candidate_id("probe", layer=layer, cluster_size=int(size)), "probe", int(size), float(pruning["probe_ratios"][0])))
+            for ratio in pruning["probe_ratios"]:
+                _append_row(
+                    rows,
+                    _base_row(
+                        _candidate_id("probe", layer=layer, cluster_size=int(size), ratio=float(ratio)),
+                        "probe",
+                        int(size),
+                        float(ratio),
+                        layer,
+                    ),
+                )
     for size in pruning["cluster_sizes"]:
         for ratio in pruning["global_ratios"]:
             _append_row(rows, _base_row(_candidate_id("global", cluster_size=int(size), ratio=float(ratio)), "global", int(size), float(ratio)))
@@ -160,8 +184,23 @@ def _failure(row: Metrics, exc: Exception) -> None:
     row["error"] = f"{type(exc).__name__}: {exc}"
 
 
+def _skip(row: Metrics, reason: str) -> None:
+    if row["status"] == "planned":
+        row["status"] = "skipped"
+        row["reason"] = reason
+        row["error"] = reason
+
+
+def _rows_for_stage(rows: list[Metrics], stage: str) -> list[Metrics]:
+    return [row for row in rows if row["stage"] == stage]
+
+
 def _record_export(row: Metrics, exported: Path, baseline: Mapping[str, Any] | None = None) -> None:
     row["exported_path"] = str(exported)
+    artifact_format = exported.suffix.removeprefix(".").lower()
+    if not artifact_format:
+        raise ValueError("Exported artifact has no file format suffix.")
+    row["artifact_format"] = artifact_format
     if exported.exists():
         row["serialized_bytes"] = exported.stat().st_size
     if baseline is not None:
@@ -169,6 +208,44 @@ def _record_export(row: Metrics, exported: Path, baseline: Mapping[str, Any] | N
         candidate_bytes = row.get("serialized_bytes")
         if baseline_bytes and candidate_bytes is not None:
             row["serialized_reduction"] = 1.0 - float(candidate_bytes) / float(baseline_bytes)
+
+
+def _artifact_stats(path: Path) -> Metrics:
+    if not path.exists():
+        raise FileNotFoundError(path)
+    return {"serialized_bytes": path.stat().st_size}
+
+
+def _validate_structural_reduction(before: Mapping[str, Any], after: Mapping[str, Any]) -> Metrics:
+    from infrared_detection.compression.pruning import validate_structural_reduction
+
+    reduction = validate_structural_reduction(before, after)
+    if float(after["serialized_bytes"]) >= float(before["serialized_bytes"]):
+        raise ValueError("Serialized artifact did not reduce in the comparable export format.")
+    return reduction
+
+
+def _validate_candidate_reduction(
+    row: Metrics,
+    model_stats: Mapping[str, Any],
+    exported: Path,
+    baseline: Mapping[str, Any],
+    active: ClusterEvaluationAdapters,
+) -> None:
+    if row["artifact_format"] != baseline["artifact_format"]:
+        raise ValueError(
+            "Candidate artifact format does not match the baseline export format "
+            f"({row['artifact_format']} != {baseline['artifact_format']})."
+        )
+    artifact_stats = active.artifact_stats or _artifact_stats
+    validator = active.validate_reduction or _validate_structural_reduction
+    after = {**dict(model_stats), **dict(artifact_stats(exported))}
+    before = {
+        "parameter_count": baseline["parameter_count"],
+        "serialized_bytes": baseline["serialized_bytes"],
+    }
+    row.update(validator(before, after))
+    row["serialized_bytes"] = after["serialized_bytes"]
 
 
 def run_cluster_evaluation(
@@ -192,58 +269,95 @@ def run_cluster_evaluation(
     pruning = config["pruning"]
     rtx_device = str(config["targets"]["rtx_screening_device"])
     orin_device = str(config["targets"]["orin_target"])
-    rows: list[Metrics] = []
-
-    baseline = _base_row("baseline", "baseline", ratio=0.0)
-    _append_row(rows, baseline)
+    rows = _planned_rows(config)
+    baseline = next(row for row in rows if row["stage"] == "baseline")
     try:
         baseline_model = active.load_model(checkpoint)
-        _metrics_row(baseline, active.evaluate(baseline_model, config, rtx_device), active.stats(checkpoint))
+        baseline_metrics = active.evaluate(baseline_model, config, orin_device)
+        baseline_model_stats = active.stats(baseline_model)
+        baseline_export = Path(active.export(checkpoint, config, output_dir / "baseline"))
+        _record_export(baseline, baseline_export)
+        baseline_artifact_stats = (active.artifact_stats or _artifact_stats)(baseline_export)
+        _metrics_row(
+            baseline,
+            baseline_metrics,
+            {**dict(baseline_model_stats), **dict(baseline_artifact_stats)},
+        )
         baseline["status"] = "completed"
-        baseline["screening_device"] = rtx_device
-        layers = active.safe_layers(baseline_model, config)
+        baseline["target_device"] = orin_device
+        baseline["evaluation_device"] = orin_device
     except Exception as exc:
         _failure(baseline, exc)
+        for row in rows[1:]:
+            _skip(row, f"Skipped because baseline failed: {baseline['error']}")
+        _write_artifacts(output_dir, resolved_config_path, rows)
+        return rows
+
+    try:
+        configured_layers = list(pruning["safe_layers"])
+        layers = [layer for layer in active.safe_layers(baseline_model, config) if layer in configured_layers]
+    except Exception as exc:
+        reason = f"Skipped because safe-layer screening failed: {type(exc).__name__}: {exc}"
+        for row in rows[1:]:
+            _skip(row, reason)
         _write_artifacts(output_dir, resolved_config_path, rows)
         return rows
 
     surviving_sizes: set[int] = set()
-    for layer in layers:
-        for size in pruning["cluster_sizes"]:
-            row = _base_row(_candidate_id("probe", layer=layer, cluster_size=int(size)), "probe", int(size), float(pruning["probe_ratios"][0]))
-            _append_row(rows, row)
-            try:
-                probe_model = active.load_model(checkpoint)
-                pruned_model = active.make_probe(probe_model, layer, int(size), float(pruning["probe_ratios"][0]))
-                _metrics_row(row, active.evaluate(pruned_model, config, rtx_device), active.stats(pruned_model), baseline)
-                exported = Path(active.export(pruned_model, config, output_dir / row["candidate_id"]))
-                _record_export(row, exported, baseline)
-                row.update(active.profile(exported, rtx_device))
-                row["screening_device"] = rtx_device
-                row["status"] = "screened_in" if _screen_probe(row, float(baseline["map50_95"]), config) else "screened_out"
-                if row["status"] == "screened_in":
-                    surviving_sizes.add(int(size))
-            except Exception as exc:
-                _failure(row, exc)
+    for row in _rows_for_stage(rows, "probe"):
+        layer = str(row["layer"])
+        if layer not in layers:
+            _skip(row, f"Skipped because safe-layer screening excluded {layer}.")
+            continue
+        size = int(row["cluster_size"])
+        probe_ratio = float(row["prune_ratio"])
+        try:
+            probe_model = active.load_model(checkpoint)
+            pruned_model = active.make_probe(probe_model, layer, size, probe_ratio)
+            probe_metrics = active.evaluate(pruned_model, config, rtx_device)
+            probe_model_stats = active.stats(pruned_model)
+            exported = Path(active.export(pruned_model, config, output_dir / row["candidate_id"]))
+            _record_export(row, exported, baseline)
+            _validate_candidate_reduction(row, probe_model_stats, exported, baseline, active)
+            _metrics_row(row, probe_metrics, {**dict(probe_model_stats), "serialized_bytes": row["serialized_bytes"]}, baseline)
+            row.update(active.profile(exported, rtx_device))
+            row["screening_device"] = rtx_device
+            row["evaluation_device"] = rtx_device
+            row["profile_device"] = rtx_device
+            row["status"] = "screened_in" if _screen_probe(row, float(baseline["map50_95"]), config) else "screened_out"
+            if row["status"] == "screened_in":
+                surviving_sizes.add(size)
+        except Exception as exc:
+            _failure(row, exc)
 
-    for size in sorted(surviving_sizes):
-        for ratio in pruning["global_ratios"]:
-            row = _base_row(_candidate_id("global", cluster_size=size, ratio=float(ratio)), "global", size, float(ratio))
-            _append_row(rows, row)
-            try:
-                candidate = active.make_global(active.load_model(checkpoint), size, float(ratio))
-                candidate_dir = output_dir / row["candidate_id"]
-                best_checkpoint = active.fine_tune(candidate, config, candidate_dir)
-                reloaded = active.reload_model(Path(best_checkpoint))
-                _metrics_row(row, active.evaluate(reloaded, config, orin_device), active.stats(reloaded), baseline)
-                exported = Path(active.export(Path(best_checkpoint), config, candidate_dir))
-                row["checkpoint_path"] = str(Path(best_checkpoint))
-                _record_export(row, exported, baseline)
-                row["target_device"] = orin_device
-                row.update(active.profile(exported, orin_device))
-                row["status"] = classify_candidate(float(baseline["map50_95"]), float(row["map50_95"]))
-            except Exception as exc:
-                _failure(row, exc)
+    for row in _rows_for_stage(rows, "global"):
+        if int(row["cluster_size"]) not in surviving_sizes:
+            _skip(row, f"Skipped because no probe survived RTX screening for cluster size {row['cluster_size']}.")
+
+    for row in _rows_for_stage(rows, "global"):
+        if row["status"] != "planned":
+            continue
+        size = int(row["cluster_size"])
+        ratio = float(row["prune_ratio"])
+        try:
+            candidate = active.make_global(active.load_model(checkpoint), size, ratio)
+            candidate_dir = output_dir / row["candidate_id"]
+            best_checkpoint = active.fine_tune(candidate, config, candidate_dir)
+            reloaded = active.reload_model(Path(best_checkpoint))
+            global_metrics = active.evaluate(reloaded, config, orin_device)
+            global_model_stats = active.stats(reloaded)
+            exported = Path(active.export(Path(best_checkpoint), config, candidate_dir))
+            row["checkpoint_path"] = str(Path(best_checkpoint))
+            _record_export(row, exported, baseline)
+            _validate_candidate_reduction(row, global_model_stats, exported, baseline, active)
+            _metrics_row(row, global_metrics, {**dict(global_model_stats), "serialized_bytes": row["serialized_bytes"]}, baseline)
+            row["target_device"] = orin_device
+            row.update(active.profile(exported, orin_device))
+            row["evaluation_device"] = orin_device
+            row["profile_device"] = orin_device
+            row["status"] = classify_candidate(float(baseline["map50_95"]), float(row["map50_95"]))
+        except Exception as exc:
+            _failure(row, exc)
 
     _write_artifacts(output_dir, resolved_config_path, rows)
     return rows
