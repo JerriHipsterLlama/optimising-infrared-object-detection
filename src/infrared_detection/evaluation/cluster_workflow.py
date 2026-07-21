@@ -362,6 +362,7 @@ def run_cluster_evaluation(
     config_path: Path,
     dry_run: bool = False,
     adapters: ClusterEvaluationAdapters | None = None,
+    screen_only: bool = False,
 ) -> list[Metrics]:
     """Run (or plan) baseline, probe, and global cluster-pruning evaluation.
 
@@ -379,7 +380,7 @@ def run_cluster_evaluation(
     orin_target = str(targets["orin_target"])
     if orin_target != _ORIN_TARGET:
         raise ValueError(f"targets.orin_target must be {_ORIN_TARGET!r}, got {orin_target!r}.")
-    if adapters is None and not _is_jetson_orin_runtime():
+    if adapters is None and not screen_only and not _is_jetson_orin_runtime():
         raise RuntimeError(
             "Refusing to claim Jetson Orin Nano results on an unverified host. "
             "Run the default workflow on the Jetson Orin Nano or inject a remote Orin adapter."
@@ -389,11 +390,12 @@ def run_cluster_evaluation(
     pruning = config["pruning"]
     rtx_device = str(targets["rtx_screening_device"])
     orin_execution_device = _orin_execution_device(config)
+    baseline_execution_device = rtx_device if screen_only else orin_execution_device
     rows = _planned_rows(config)
     baseline = next(row for row in rows if row["stage"] == "baseline")
     try:
         baseline_model = active.load_model(checkpoint)
-        baseline_metrics = active.evaluate(baseline_model, config, orin_execution_device)
+        baseline_metrics = active.evaluate(baseline_model, config, baseline_execution_device)
         baseline_model_stats = active.stats(baseline_model)
         baseline_export = Path(active.export(checkpoint, config, output_dir / "baseline"))
         _record_export(baseline, baseline_export)
@@ -404,8 +406,10 @@ def run_cluster_evaluation(
             {**dict(baseline_model_stats), **dict(baseline_artifact_stats)},
         )
         baseline["status"] = "completed"
-        baseline["target_device"] = orin_target
-        baseline["evaluation_device"] = orin_execution_device
+        baseline["target_device"] = None if screen_only else orin_target
+        baseline["evaluation_device"] = baseline_execution_device
+        if screen_only:
+            baseline["screening_device"] = rtx_device
     except Exception as exc:
         _failure(baseline, exc)
         for row in rows[1:]:
@@ -449,6 +453,12 @@ def run_cluster_evaluation(
                 surviving_sizes.add(size)
         except Exception as exc:
             _failure(row, exc)
+
+    if screen_only:
+        for row in _rows_for_stage(rows, "global"):
+            _skip(row, "screen-only mode does not run global candidates")
+        _write_artifacts(output_dir, resolved_config_path, rows)
+        return rows
 
     for row in _rows_for_stage(rows, "global"):
         if int(row["cluster_size"]) not in surviving_sizes:

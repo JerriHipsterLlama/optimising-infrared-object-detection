@@ -100,6 +100,24 @@ def test_dry_run_emits_baseline_probe_and_global_manifest(tmp_path):
     assert (tmp_path / "artifacts" / "manifest.json").exists()
 
 
+def test_screen_only_uses_rtx_and_skips_global_candidates(tmp_path, adapters):
+    config_path = write_config(tmp_path)
+    evaluated_devices = []
+
+    def evaluate(model, config, device):
+        del model, config
+        evaluated_devices.append(device)
+        return _metrics(0.50)
+
+    adapters.evaluate = evaluate
+    rows = run_cluster_evaluation(config_path, adapters=adapters, screen_only=True)
+
+    assert evaluated_devices[0] == "rtx"
+    assert all(row["status"] == "skipped" for row in rows if row["stage"] == "global")
+    assert all(row.get("hardware_benchmarked") is not True for row in rows)
+    assert all(row["stage"] != "global" or "screen-only" in row["reason"] for row in rows)
+
+
 def test_one_failed_probe_does_not_stop_remaining_candidates(monkeypatch, tmp_path, adapters):
     calls = 0
 

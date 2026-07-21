@@ -20,3 +20,4 @@ def test_cluster_evaluation_app_exposes_help():
     assert result.returncode == 0, result.stderr
     assert "--config" in result.stdout
     assert "--dry-run" in result.stdout
+    assert "--screen-only" in result.stdout
