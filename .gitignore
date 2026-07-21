@@ -5,6 +5,8 @@ build/**
 /.venv/*
 **/__pycache__/**
 /models/**
+.superpowers/*
+docs/superpowers/*
 
 # Generated model and inference artifacts; retain directory placeholders.
 artifacts/**
