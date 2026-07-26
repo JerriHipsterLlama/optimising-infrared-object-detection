@@ -631,7 +631,11 @@ def run_filterwise_evaluation(
                 row["checkpoint_path"] = str(checkpoint_path)
                 if checkpoint_path.exists():
                     row["checkpoint_bytes"] = checkpoint_path.stat().st_size
-                metrics = active.evaluate(current_model, config, rtx_device)
+                # Ultralytics validation may fuse modules and create inference-mode
+                # tensors in-place. Keep the sequentially prunable model separate
+                # so the next minimum-weight step still has a trainable model.
+                evaluation_model = active.load_model(checkpoint_path)
+                metrics = active.evaluate(evaluation_model, config, rtx_device)
                 model_stats = dict(active.stats(current_model))
                 _metrics_row(row, metrics, model_stats, baseline)
                 row["screening_device"] = rtx_device

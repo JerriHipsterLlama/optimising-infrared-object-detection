@@ -327,6 +327,41 @@ def test_filterwise_workflow_prunes_sequentially_and_can_continue_full_curve(tmp
     assert candidates[1]["hardware_benchmarked"] is False
 
 
+def test_filterwise_workflow_evaluates_a_reloaded_candidate_copy(tmp_path, adapters):
+    config_path = write_config(tmp_path)
+    config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    config["pruning"]["safe_layers"] = ["model.1"]
+    config["pruning"]["filter_sweep_layers"] = ["model.1"]
+    config["pruning"]["filter_sweep_widths"] = {"model.1": 4}
+    config["screening"] = {
+        "max_map50_95_drop": 0.02,
+        "early_stop": False,
+        "latency_profile_removals": [],
+    }
+    config_path.write_text(yaml.safe_dump(config), encoding="utf-8")
+    evaluated_models = []
+
+    def evaluate(model, config, device):
+        del config, device
+        evaluated_models.append(model)
+        model["evaluated"] = True
+        return _metrics(0.50)
+
+    def step(model, layer, config):
+        del layer, config
+        assert not model.get("evaluated", False)
+        return model
+
+    adapters.evaluate = evaluate
+    adapters.make_filterwise_step = step
+
+    rows = run_filterwise_evaluation(config_path, adapters=adapters, full_curve=True)
+
+    assert len(evaluated_models) == 4
+    assert all(model["evaluated"] for model in evaluated_models)
+    assert all(row["status"] == "screened_in" for row in rows[1:])
+
+
 def test_filterwise_workflow_early_stops_after_consecutive_near_zero_accuracy(tmp_path, adapters):
     config_path = write_config(tmp_path)
     config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
