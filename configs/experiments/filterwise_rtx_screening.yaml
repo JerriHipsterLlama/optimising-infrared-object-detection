@@ -1,0 +1,49 @@
+model:
+  checkpoint: models/baseline/yolov8/train/weights/best.pt
+
+data:
+  dataset_yaml: data/camel/camel.yaml
+
+experiment:
+  image_size: 336
+  num_classes: 4
+  seed: 7
+  batch_size: 1
+  output_dir: runs/experiments/filterwise_rtx_screening
+
+runtime:
+  device: 0
+  precision: fp16
+  conf: 0.25
+  iou: 0.6
+
+pruning:
+  # Conv0 keeps its one-channel image input; its output filters remain sweepable.
+  protected_layers: [model.22]
+  filter_sweep_layers:
+    - model.0.conv
+    - model.2.cv2.conv
+    - model.4.cv2.conv
+    - model.6.cv2.conv
+    - model.8.cv2.conv
+  filter_sweep_widths:
+    model.0.conv: 64
+    model.2.cv2.conv: 128
+    model.4.cv2.conv: 256
+    model.6.cv2.conv: 512
+    model.8.cv2.conv: 512
+
+screening:
+  max_map50_95_drop: 0.02
+  early_stop: true
+  early_stop_map50_95: 0.001
+  early_stop_consecutive: 2
+  latency_profile_removals: [7, 8, 9, 15, 16, 17, 23, 24, 25, 31, 32, 33]
+
+targets:
+  rtx_screening_device: 0
+  orin_target: jetson_orin_nano
+  orin_execution_device: '0'
+
+export:
+  format: engine

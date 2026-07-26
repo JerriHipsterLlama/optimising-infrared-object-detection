@@ -26,6 +26,9 @@ def build_yolo_dependency_graph(model: nn.Module, example_input: torch.Tensor) -
             "Structured pruning requires torch-pruning. Install the project dependency before pruning."
         ) from exc
 
+    # Ultralytics checkpoints are loaded with gradients disabled for inference.
+    # Torch-Pruning traces autograd edges, so re-enable them before graph build.
+    model.requires_grad_(True)
     graph = tp.DependencyGraph().build_dependency(model, example_inputs=example_input)
     modules = {
         name: module

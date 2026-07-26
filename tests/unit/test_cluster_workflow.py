@@ -12,7 +12,13 @@ from torch import nn
 from infrared_detection import export as export_module
 from infrared_detection.compression.pruning import cluster_probe as cluster_probe_module
 from infrared_detection.evaluation import cluster_workflow
-from infrared_detection.evaluation.cluster_workflow import ClusterEvaluationAdapters, merge_jetson_metrics, run_cluster_evaluation
+from infrared_detection.evaluation.cluster_workflow import (
+    ClusterEvaluationAdapters,
+    _planned_filterwise_rows,
+    merge_jetson_metrics,
+    run_cluster_evaluation,
+    run_filterwise_evaluation,
+)
 
 
 def write_config(tmp_path: Path) -> Path:
@@ -80,6 +86,8 @@ def adapters(tmp_path: Path) -> ClusterEvaluationAdapters:
         stats=lambda model_or_path: {
             "parameter_count": 8 if isinstance(model_or_path, dict) and model_or_path.get("kind") in {"probe", "global"} else 10,
         },
+        make_filterwise_step=lambda model, layer, config: {"kind": "probe", "layer": layer},
+        save_checkpoint=lambda model, output_dir: _write_fixture_checkpoint(output_dir),
     )
 
 
@@ -90,6 +98,13 @@ def _write_fixture_export(output_dir: Path) -> Path:
     return artifact
 
 
+def _write_fixture_checkpoint(output_dir: Path) -> Path:
+    output_dir.mkdir(parents=True, exist_ok=True)
+    checkpoint = output_dir / "candidate.pt"
+    checkpoint.write_bytes(b"checkpoint")
+    return checkpoint
+
+
 def test_dry_run_emits_baseline_probe_and_global_manifest(tmp_path):
     rows = run_cluster_evaluation(write_config(tmp_path), dry_run=True)
 
@@ -98,6 +113,243 @@ def test_dry_run_emits_baseline_probe_and_global_manifest(tmp_path):
     assert len({row["candidate_id"] for row in rows}) == len(rows)
     assert (tmp_path / "artifacts" / "candidates.csv").exists()
     assert (tmp_path / "artifacts" / "manifest.json").exists()
+
+
+def test_filterwise_planner_removes_every_count_without_cluster_grouping():
+    config = {
+        "pruning": {
+            "filter_sweep_layers": ["model.0.conv"],
+            "filter_sweep_widths": {"model.0.conv": 4},
+        }
+    }
+
+    rows = _planned_filterwise_rows(config)
+
+    assert [row["stage"] for row in rows] == ["baseline", "filterwise", "filterwise", "filterwise"]
+    assert [row["filters_removed"] for row in rows[1:]] == [1, 2, 3]
+    assert [row["filters_after"] for row in rows[1:]] == [3, 2, 1]
+    assert [row["filter_reduction"] for row in rows[1:]] == [0.25, 0.5, 0.75]
+    assert [row["candidate_id"] for row in rows[1:]] == [
+        "filterwise-model-0-conv-filters-1",
+        "filterwise-model-0-conv-filters-2",
+        "filterwise-model-0-conv-filters-3",
+    ]
+
+
+def test_filterwise_planner_requires_a_width_for_each_layer():
+    with pytest.raises(ValueError, match="filter_sweep_widths"):
+        _planned_filterwise_rows(
+            {"pruning": {"filter_sweep_layers": ["model.0.conv"], "filter_sweep_widths": {}}}
+        )
+
+
+def test_filterwise_step_recomputes_minimum_weight_and_removes_one_filter(monkeypatch, tmp_path):
+    model = _importance_model()
+    config = yaml.safe_load(write_config(tmp_path).read_text(encoding="utf-8"))
+    scores = iter(
+        [
+            {"model.2.cv1.conv": torch.tensor([9.0, 0.1, 0.2, 8.0, 0.3, 7.0, 6.0, 5.0])},
+            {"model.2.cv1.conv": torch.tensor([9.0, 8.0, 0.05, 7.0, 6.0, 5.0, 4.0, 3.0])},
+        ]
+    )
+    pruned_indices = []
+
+    monkeypatch.setattr(
+        "infrared_detection.compression.pruning.compute_channel_importance",
+        lambda model: next(scores),
+    )
+    monkeypatch.setattr(
+        cluster_probe_module,
+        "run_filterwise_probe",
+        lambda model, example_input, layer_name, prune_indices: (
+            pruned_indices.append((layer_name, prune_indices)) or model
+        ),
+    )
+
+    cluster_workflow._filterwise_step(model, "model.2.cv1.conv", config)
+    cluster_workflow._filterwise_step(model, "model.2.cv1.conv", config)
+
+    assert pruned_indices == [
+        ("model.2.cv1.conv", (1,)),
+        ("model.2.cv1.conv", (2,)),
+    ]
+
+
+def test_filterwise_probe_returns_the_pruned_model(monkeypatch, tmp_path):
+    model = _importance_model()
+    config = yaml.safe_load(write_config(tmp_path).read_text(encoding="utf-8"))
+    monkeypatch.setattr(
+        cluster_probe_module,
+        "run_filterwise_probe",
+        lambda model, example_input, layer_name, prune_indices: model,
+    )
+
+    result = cluster_workflow._filterwise_probe(model, "model.2.cv1.conv", 1, config)
+
+    assert result is model
+
+
+def test_filterwise_config_uses_the_five_representative_layers():
+    config = yaml.safe_load(
+        Path("configs/experiments/filterwise_rtx_screening.yaml").read_text(encoding="utf-8")
+    )
+
+    assert config["pruning"]["filter_sweep_layers"] == [
+        "model.0.conv",
+        "model.2.cv2.conv",
+        "model.4.cv2.conv",
+        "model.6.cv2.conv",
+        "model.8.cv2.conv",
+    ]
+    assert len(_planned_filterwise_rows(config)) == 1468
+
+
+def test_filterwise_workflow_profiles_all_candidates_without_serialized_size_gate(monkeypatch, tmp_path, adapters):
+    config_path = write_config(tmp_path)
+    config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    config["pruning"]["safe_layers"] = ["model.1"]
+    config["pruning"]["filter_sweep_layers"] = ["model.1"]
+    config["pruning"]["filter_sweep_widths"] = {"model.1": 4}
+    config["export"] = {"format": "onnx"}
+    config_path.write_text(yaml.safe_dump(config), encoding="utf-8")
+
+    monkeypatch.setattr(
+        cluster_workflow,
+        "_filterwise_probe",
+        lambda model, layer, filters_removed, config: {
+            "kind": "probe",
+            "layer": layer,
+            "filters_removed": filters_removed,
+        },
+    )
+    adapters.export = lambda model, config, output_dir: _write_fixture_export(output_dir)
+
+    rows = run_filterwise_evaluation(config_path, adapters=adapters)
+
+    candidates = [row for row in rows if row["stage"] == "filterwise"]
+    assert len(candidates) == 3
+    assert all(row["status"] == "screened_in" for row in candidates)
+    assert all(row["hardware_benchmarked"] is True for row in candidates)
+    assert all(row["export_validation_status"] == "passed" for row in candidates)
+
+
+def test_filterwise_workflow_checkpoints_after_baseline_and_each_candidate(monkeypatch, tmp_path, adapters):
+    config_path = write_config(tmp_path)
+    config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    config["pruning"]["safe_layers"] = ["model.1"]
+    config["pruning"]["filter_sweep_layers"] = ["model.1"]
+    config["pruning"]["filter_sweep_widths"] = {"model.1": 3}
+    config["export"] = {"format": "onnx"}
+    config_path.write_text(yaml.safe_dump(config), encoding="utf-8")
+    monkeypatch.setattr(
+        cluster_workflow,
+        "_filterwise_probe",
+        lambda model, layer, filters_removed, config: {"kind": "probe"},
+    )
+    checkpoints = []
+    monkeypatch.setattr(
+        cluster_workflow,
+        "_write_artifacts",
+        lambda output_dir, resolved_config_path, rows: checkpoints.append(
+            [(row["candidate_id"], row["status"]) for row in rows]
+        ),
+    )
+
+    run_filterwise_evaluation(config_path, adapters=adapters)
+
+    assert len(checkpoints) == 3
+    assert checkpoints[0] == [("baseline", "completed"),
+                              ("filterwise-model-1-filters-1", "planned"),
+                              ("filterwise-model-1-filters-2", "planned")]
+    assert all(status == "screened_in" for _, status in checkpoints[-1][1:])
+
+
+def test_filterwise_workflow_resumes_completed_rows_from_checkpoint(monkeypatch, tmp_path, adapters):
+    config_path = write_config(tmp_path)
+    config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    config["pruning"]["safe_layers"] = ["model.1"]
+    config["pruning"]["filter_sweep_layers"] = ["model.1"]
+    config["pruning"]["filter_sweep_widths"] = {"model.1": 3}
+    config["export"] = {"format": "onnx"}
+    config_path.write_text(yaml.safe_dump(config), encoding="utf-8")
+    monkeypatch.setattr(
+        cluster_workflow,
+        "_filterwise_probe",
+        lambda model, layer, filters_removed, config: {"kind": "probe"},
+    )
+
+    run_filterwise_evaluation(config_path, adapters=adapters)
+
+    calls = {"evaluate": 0, "export": 0, "profile": 0}
+    adapters.evaluate = lambda model, config, device: calls.__setitem__("evaluate", calls["evaluate"] + 1) or _metrics(0.50)
+    adapters.export = lambda model, config, output_dir: calls.__setitem__("export", calls["export"] + 1) or _write_fixture_export(output_dir)
+    adapters.profile = lambda exported_path, device: calls.__setitem__("profile", calls["profile"] + 1) or {"latency_p50_ms": 4.0}
+
+    rows = run_filterwise_evaluation(config_path, adapters=adapters)
+
+    assert rows[0]["status"] == "completed"
+    assert all(row["status"] == "screened_in" for row in rows[1:])
+    assert calls == {"evaluate": 0, "export": 0, "profile": 0}
+
+
+def test_filterwise_workflow_prunes_sequentially_and_can_continue_full_curve(tmp_path, adapters):
+    config_path = write_config(tmp_path)
+    config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    config["pruning"]["safe_layers"] = ["model.1"]
+    config["pruning"]["filter_sweep_layers"] = ["model.1"]
+    config["pruning"]["filter_sweep_widths"] = {"model.1": 4}
+    config["screening"] = {
+        "max_map50_95_drop": 0.02,
+        "early_stop": True,
+        "early_stop_map50_95": 0.001,
+        "early_stop_consecutive": 1,
+        "latency_profile_removals": [1],
+    }
+    config["export"] = {"format": "onnx"}
+    config_path.write_text(yaml.safe_dump(config), encoding="utf-8")
+    seen_models = []
+
+    def evaluate(model, config, device):
+        del config, device
+        seen_models.append(model)
+        return _metrics(0.50)
+
+    adapters.evaluate = evaluate
+
+    rows = run_filterwise_evaluation(config_path, adapters=adapters, full_curve=True)
+
+    candidates = [row for row in rows if row["stage"] == "filterwise"]
+    assert len(candidates) == 3
+    assert all(row["status"] == "screened_in" for row in candidates)
+    assert len(seen_models) == 4
+    assert all(row["checkpoint_path"].endswith("candidate.pt") for row in candidates)
+    assert candidates[0]["hardware_benchmarked"] is True
+    assert candidates[1]["hardware_benchmarked"] is False
+
+
+def test_filterwise_workflow_early_stops_after_consecutive_near_zero_accuracy(tmp_path, adapters):
+    config_path = write_config(tmp_path)
+    config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    config["pruning"]["safe_layers"] = ["model.1"]
+    config["pruning"]["filter_sweep_layers"] = ["model.1"]
+    config["pruning"]["filter_sweep_widths"] = {"model.1": 5}
+    config["screening"] = {
+        "max_map50_95_drop": 0.02,
+        "early_stop": True,
+        "early_stop_map50_95": 0.001,
+        "early_stop_consecutive": 2,
+        "latency_profile_removals": [],
+    }
+    config_path.write_text(yaml.safe_dump(config), encoding="utf-8")
+    accuracies = iter([0.50, 0.0, 0.0, 0.0])
+    adapters.evaluate = lambda model, config, device: _metrics(next(accuracies))
+
+    rows = run_filterwise_evaluation(config_path, adapters=adapters)
+
+    candidates = [row for row in rows if row["stage"] == "filterwise"]
+    assert [row["status"] for row in candidates[:2]] == ["screened_out", "screened_out"]
+    assert all(row["status"] == "skipped" for row in candidates[2:])
+    assert all("early stopping" in row["reason"].lower() for row in candidates[2:])
 
 
 def test_screen_only_uses_rtx_and_skips_global_candidates(tmp_path, adapters):
@@ -301,6 +553,28 @@ def test_structural_probe_uses_lowest_importance_complete_cluster(monkeypatch, t
     )
 
     assert [spec.prune_indices for spec in specs] == [(1, 2)]
+
+
+def test_structural_probe_aligns_dependency_graph_example_to_yolo_stride(monkeypatch, tmp_path):
+    shapes = []
+
+    def record_prune(model, example, spec):
+        del spec
+        shapes.append(tuple(example.shape))
+        return model
+
+    monkeypatch.setattr(cluster_probe_module, "run_structural_probe", record_prune)
+    config = yaml.safe_load(write_config(tmp_path).read_text(encoding="utf-8"))
+
+    cluster_workflow._structural_probe(
+        _importance_model(),
+        "model.2.cv1.conv",
+        cluster_size=2,
+        ratio=0.25,
+        config=config,
+    )
+
+    assert shapes == [(1, 3, 352, 352)]
 
 
 def test_structural_probe_applies_requested_complete_clusters_sequentially(monkeypatch, tmp_path):

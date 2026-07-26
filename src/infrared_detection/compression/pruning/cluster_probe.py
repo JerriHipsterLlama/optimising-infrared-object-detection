@@ -23,14 +23,25 @@ def make_keep_mask(output_channels: int, prune_indices: tuple[int, ...]) -> torc
 def run_structural_probe(model: nn.Module, example_input: torch.Tensor, spec: ClusterSpec) -> nn.Module:
     """Physically prune one candidate cluster through a fresh dependency graph."""
 
-    if spec.layer_name == _YOLO_DETECTION_HEAD_PREFIX or spec.layer_name.startswith(
+    return run_filterwise_probe(model, example_input, spec.layer_name, spec.prune_indices)
+
+
+def run_filterwise_probe(
+    model: nn.Module,
+    example_input: torch.Tensor,
+    layer_name: str,
+    prune_indices: tuple[int, ...],
+) -> nn.Module:
+    """Physically remove an explicit set of output filters from one layer."""
+
+    if layer_name == _YOLO_DETECTION_HEAD_PREFIX or layer_name.startswith(
         f"{_YOLO_DETECTION_HEAD_PREFIX}."
     ):
-        raise ValueError(f"Structural probes cannot target detection head module {spec.layer_name}.")
+        raise ValueError(f"Filter-wise probes cannot target detection head module {layer_name}.")
     graph = build_yolo_dependency_graph(model, example_input)
-    module = graph.modules[spec.layer_name]
+    module = graph.modules[layer_name]
     output_channels = module.out_channels if isinstance(module, nn.Conv2d) else module.out_features
-    keep_mask = make_keep_mask(output_channels, spec.prune_indices)
+    keep_mask = make_keep_mask(output_channels, prune_indices)
     if not bool(keep_mask.any()):
-        raise ValueError(f"Probe for {spec.layer_name} removes every output channel.")
-    return prune_yolo_channels(graph, {spec.layer_name: keep_mask})
+        raise ValueError(f"Probe for {layer_name} removes every output channel.")
+    return prune_yolo_channels(graph, {layer_name: keep_mask})
