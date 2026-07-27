@@ -57,3 +57,31 @@ Output:
 - The isolated worktree does not contain `.venv\Scripts\python.exe`; the parent repository virtual environment was used via `..\..\.venv\Scripts\python.exe`.
 - The worktree package is not installed editable in that environment, so `PYTHONPATH=src` was required to import the implementation under test.
 - No active filterwise run files were changed.
+
+## Round 1 review fix report
+
+Status: complete. Addressed all reviewer findings.
+
+Changed files:
+
+- `configs/experiments/rtx_compression_matrix.yaml`: explicitly declares the filterwise manifest source, candidate layer `model.8.cv2.conv`, cluster size `8`, and pruning ratio `0.25`.
+- `src/infrared_detection/evaluation/compression_matrix.py`: requires the exact ordered precision matrix `[fp32, fp16, int8]`; validates explicit structured-pruning provenance; propagates the research-candidate fields into planner rows and provenance.
+- `tests/unit/test_compression_matrix_workflow.py`: adds subset, duplicate, and reordered precision rejection tests; adds the negative load-config test; corrects the loader test name; verifies explicit candidate provenance from the real RTX config.
+
+Exact focused test command and output:
+
+```powershell
+$env:PYTHONPATH='src'; ..\..\.venv\Scripts\python.exe -m pytest tests\unit\test_compression_matrix_workflow.py -q
+```
+
+```text
+..........                                                               [100%]
+10 passed in 0.14s
+```
+
+Fix commit:
+
+- `e322a2c19155bca75f65fc479961ea460e304748` (`Fix RTX compression matrix review findings`)
+- Prior implementation commit: `e94c08370d8bcd6f44c876e0833b1ef8c663afd8`
+
+The report file is ignored by the repository configuration and must be force-added when committing. The active filterwise run remains unchanged.
