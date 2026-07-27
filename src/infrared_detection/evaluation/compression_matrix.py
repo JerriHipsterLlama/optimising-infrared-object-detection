@@ -388,7 +388,7 @@ class CompressionMatrixAdapters:
     build_pruned_checkpoint: Callable[[Mapping[str, Any], Path, float], Path]
     export_checkpoint: Callable[[Path, Mapping[str, Any], Path], Path]
     build_engine: Callable[[Path, Path, str, Path | None, int], Mapping[str, Any]]
-    evaluate_checkpoint: Callable[[Path, Mapping[str, Any], str], Mapping[str, Any]]
+    evaluate_engine: Callable[[Path, Mapping[str, Any], str], Mapping[str, Any]]
     parameter_count: Callable[[Path], int]
     benchmark_engine: Callable[[Path, str], Mapping[str, Any]]
 
@@ -403,7 +403,7 @@ class CompressionMatrixAdapters:
             ),
             export_checkpoint=_export_checkpoint_to_onnx,
             build_engine=_build_rtx_engine,
-            evaluate_checkpoint=_evaluate_checkpoint_accuracy,
+            evaluate_engine=_evaluate_engine_accuracy,
             parameter_count=_checkpoint_parameter_count,
             benchmark_engine=_benchmark_rtx_engine,
         )
@@ -627,7 +627,7 @@ def run_compression_matrix(
             )
             if not engine.is_file():
                 raise FileNotFoundError(f"TensorRT engine was not written: {engine}")
-            metrics = dict(active.evaluate_checkpoint(variant_checkpoint, config, str(config.get("runtime", {}).get("device", "0"))))
+            metrics = dict(active.evaluate_engine(engine, config, str(config.get("runtime", {}).get("device", "0"))))
             benchmark = dict(active.benchmark_engine(engine, "rtx3070"))
             _record_paths(row, variant_checkpoint, onnx, engine)
             row.update({key: value for key, value in metrics.items() if key != "precision"})
@@ -676,8 +676,8 @@ def _build_rtx_engine(
     return build_tensorrt_engine(onnx, engine, precision, calibration_cache, workspace_mb)
 
 
-def _evaluate_checkpoint_accuracy(
-    checkpoint: Path, config: Mapping[str, Any], device: str
+def _evaluate_engine_accuracy(
+    engine: Path, config: Mapping[str, Any], device: str
 ) -> Mapping[str, Any]:
     from infrared_detection.evaluation.detection_metrics import evaluate_yolo
 
@@ -685,7 +685,7 @@ def _evaluate_checkpoint_accuracy(
     if not isinstance(data, Mapping) or not isinstance(data.get("dataset_yaml"), str):
         raise ValueError("Compression matrix requires data.dataset_yaml")
     runtime = config.get("runtime", {})
-    wrapper = _load_yolo_checkpoint(checkpoint)
+    wrapper = _load_yolo_checkpoint(engine)
     return evaluate_yolo(
         wrapper,
         str(_resolve_repo_path(data["dataset_yaml"])),

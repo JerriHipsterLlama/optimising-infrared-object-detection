@@ -85,7 +85,8 @@ def _fake_adapters(*, int8_fails: bool) -> CompressionMatrixAdapters:
         return {"command": ["trtexec", f"--onnx={onnx}"], "engine_size_bytes": engine.stat().st_size}
 
     def evaluate(checkpoint, config, device):
-        del checkpoint, config, device
+        assert checkpoint.suffix == ".engine"
+        del config, device
         return {"map50": 0.8, "map50_95": 0.5, "precision": 0.75, "recall": 0.7}
 
     def benchmark(engine, device_label):
@@ -101,7 +102,7 @@ def _fake_adapters(*, int8_fails: bool) -> CompressionMatrixAdapters:
         build_pruned_checkpoint=build_pruned,
         export_checkpoint=export,
         build_engine=build_engine,
-        evaluate_checkpoint=evaluate,
+        evaluate_engine=evaluate,
         parameter_count=lambda checkpoint: len(checkpoint.read_bytes()),
         benchmark_engine=benchmark,
     )
