@@ -85,7 +85,7 @@ git commit -m "Add RTX compression matrix planning"
 
 **Interfaces:**
 - `build_pruned_checkpoint(config: Mapping[str, Any], output_dir: Path) -> Path`
-- `select_filterwise_candidate(manifest_path: Path, layer: str, filters_removed: int) -> Mapping[str, Any]`
+- `select_filterwise_candidate(manifest_path: Path, layer: str, filters_removed: int) -> Mapping[str, Any]` (evidence lookup only)
 
 - [ ] **Step 1: Write failing tests**
 
@@ -109,9 +109,9 @@ Run: `.venv\Scripts\python.exe -m pytest tests\unit\test_compression_matrix_work
 
 Expected: FAIL because candidate selection is not implemented.
 
-- [ ] **Step 3: Implement candidate selection and pruning**
+- [ ] **Step 3: Implement candidate selection and YAML-controlled cluster pruning**
 
-Load the selected source checkpoint, compute Minimum-Weight scores, remove exactly the configured number of complete low-importance filters or clusters through the existing dependency graph, save `pruned.pt`, reload it, and record parameter-count and serialized-size changes. Reject missing, failed, or incomplete filterwise rows before pruning.
+Use the filterwise manifest only to validate the evidence row that justified the chosen cluster size. Start the actual pruning from the dense checkpoint configured in `model.checkpoint`, not from the already-pruned filterwise checkpoint. Read `candidate_layers`, `cluster_size`, `prune_ratios`, `allowed_map50_95_drop`, and `importance: minimum_weight` explicitly from YAML. Task 2 exposes an explicit `requested_ratio` helper parameter to build one deterministic grid candidate; Task 4 selects the highest ratio whose measured mAP50_95 drop stays within the configured budget. For every configured candidate layer, compute Minimum-Weight scores, form complete low-importance clusters of exactly `cluster_size`, remove the selected ratio rounded down to complete clusters through the dependency graph, save `pruned.pt`, reload it, and record parameter-count and serialized-size changes. Reject missing, failed, or incomplete evidence rows before pruning, but never prune the evidence checkpoint again.
 
 - [ ] **Step 4: Run focused tests**
 

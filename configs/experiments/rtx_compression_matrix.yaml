@@ -13,8 +13,17 @@ pruning:
   candidate_id: cluster-8-ratio-0.25
   filterwise_manifest: artifacts/filterwise_rtx_screening/manifest.json
   candidate_layer: model.8.cv2.conv
+  candidate_layers:
+    - model.0.conv
+    - model.2.cv2.conv
+    - model.4.cv2.conv
+    - model.6.cv2.conv
+    - model.8.cv2.conv
   cluster_size: 8
   filter_removal_count: 8
+  prune_ratios: [0.05, 0.10, 0.15, 0.20, 0.25, 0.30]
+  allowed_map50_95_drop: 0.02
+  importance: minimum_weight
 
 experiment:
   output_dir: runs/experiments/rtx_compression_matrix

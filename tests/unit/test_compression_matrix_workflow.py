@@ -25,8 +25,12 @@ def test_planned_variants_include_dense_and_pruned_precision_matrix():
                 "candidate_id": "cluster-8-ratio-0.25",
                 "filterwise_manifest": "artifacts/filterwise_rtx_screening/manifest.json",
                 "candidate_layer": "model.8.cv2.conv",
+                "candidate_layers": ["model.8.cv2.conv"],
                 "cluster_size": 8,
-                "pruning_ratio": 0.25,
+                "filter_removal_count": 8,
+                "prune_ratios": [0.05, 0.25],
+                "allowed_map50_95_drop": 0.02,
+                "importance": "minimum_weight",
             },
             "precisions": ["fp32", "fp16", "int8"],
         }
@@ -46,8 +50,12 @@ def test_planned_variants_include_dense_and_pruned_precision_matrix():
     assert pruned["provenance"] == {
         "filterwise_manifest": "artifacts/filterwise_rtx_screening/manifest.json",
         "candidate_layer": "model.8.cv2.conv",
+        "candidate_layers": ["model.8.cv2.conv"],
         "cluster_size": 8,
-        "pruning_ratio": 0.25,
+        "filter_removal_count": 8,
+        "prune_ratios": [0.05, 0.25],
+        "allowed_map50_95_drop": 0.02,
+        "importance": "minimum_weight",
     }
 
 
@@ -94,14 +102,60 @@ def test_rtx_config_declares_filterwise_candidate_without_inference():
 
     assert pruning["filterwise_manifest"] == "artifacts/filterwise_rtx_screening/manifest.json"
     assert pruning["candidate_layer"] == "model.8.cv2.conv"
+    assert pruning["candidate_layers"] == [
+        "model.0.conv",
+        "model.2.cv2.conv",
+        "model.4.cv2.conv",
+        "model.6.cv2.conv",
+        "model.8.cv2.conv",
+    ]
     assert pruning["cluster_size"] == 8
     assert pruning["filter_removal_count"] == 8
+    assert pruning["prune_ratios"] == [0.05, 0.10, 0.15, 0.20, 0.25, 0.30]
+    assert pruning["allowed_map50_95_drop"] == 0.02
+    assert pruning["importance"] == "minimum_weight"
     assert planned_variants(config)[3]["provenance"] == {
         "filterwise_manifest": pruning["filterwise_manifest"],
         "candidate_layer": pruning["candidate_layer"],
+        "candidate_layers": pruning["candidate_layers"],
         "cluster_size": pruning["cluster_size"],
         "filter_removal_count": pruning["filter_removal_count"],
+        "prune_ratios": pruning["prune_ratios"],
+        "allowed_map50_95_drop": pruning["allowed_map50_95_drop"],
+        "importance": pruning["importance"],
     }
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "message"),
+    [
+        ("candidate_layers", None, "candidate_layers"),
+        ("cluster_size", 0, "cluster_size"),
+        ("prune_ratios", [0.0], "prune_ratios"),
+        ("allowed_map50_95_drop", -0.01, "allowed_map50_95_drop"),
+        ("importance", "l2", "importance"),
+    ],
+)
+def test_planned_variants_requires_explicit_cluster_pruning_contract(field, value, message):
+    pruning = {
+        "enabled": True,
+        "candidate_id": "cluster-8-ratio-0.25",
+        "filterwise_manifest": "filterwise.json",
+        "candidate_layer": "model.2.conv",
+        "filter_removal_count": 8,
+        "candidate_layers": ["model.2.conv"],
+        "cluster_size": 8,
+        "prune_ratios": [0.05, 0.25],
+        "allowed_map50_95_drop": 0.02,
+        "importance": "minimum_weight",
+    }
+    if value is None:
+        del pruning[field]
+    else:
+        pruning[field] = value
+
+    with pytest.raises(ValueError, match=message):
+        planned_variants({"pruning": pruning, "precisions": ["fp32", "fp16", "int8"]})
 
 
 def test_manifest_writer_preserves_failed_and_successful_rows(tmp_path):
@@ -175,16 +229,18 @@ def test_select_filterwise_candidate_rejects_failed_row(tmp_path):
         select_filterwise_candidate(manifest, "model.2.cv2.conv", 8)
 
 
-def test_build_pruned_checkpoint_removes_selected_filters_and_records_reloaded_metrics(
+def test_build_pruned_checkpoint_prunes_dense_source_not_filterwise_evidence(
     monkeypatch, tmp_path
 ):
-    source_checkpoint = tmp_path / "candidate.pt"
-    source_model = nn.Sequential(nn.Conv2d(3, 16, kernel_size=1))
+    source_checkpoint = tmp_path / "dense.pt"
+    source_model = nn.Sequential(nn.Conv2d(3, 16, kernel_size=1), nn.Conv2d(16, 16, kernel_size=1))
     with torch.no_grad():
         source_model[0].weight.copy_(
             torch.arange(16, dtype=torch.float32).reshape(16, 1, 1, 1).repeat(1, 3, 1, 1)
         )
     torch.save(source_model, source_checkpoint)
+    evidence_checkpoint = tmp_path / "filterwise-candidate.pt"
+    torch.save(nn.Sequential(nn.Conv2d(3, 8, kernel_size=1)), evidence_checkpoint)
     manifest = tmp_path / "filterwise.json"
     manifest.write_text(
         json.dumps(
@@ -194,7 +250,7 @@ def test_build_pruned_checkpoint_removes_selected_filters_and_records_reloaded_m
                         "layer": "0",
                         "filters_removed": 8,
                         "status": "screened_in",
-                        "checkpoint_path": str(source_checkpoint),
+                        "checkpoint_path": str(evidence_checkpoint),
                     }
                 ]
             }
@@ -204,18 +260,30 @@ def test_build_pruned_checkpoint_removes_selected_filters_and_records_reloaded_m
 
     source_wrapper = SimpleNamespace(model=source_model)
     source_wrapper.save = lambda path: torch.save(source_wrapper.model, path)
-    pruned_model = nn.Sequential(nn.Conv2d(3, 8, kernel_size=1))
+    after_first_layer = nn.Sequential(nn.Conv2d(3, 8, kernel_size=1), nn.Conv2d(8, 16, kernel_size=1))
+    with torch.no_grad():
+        after_first_layer[1].weight.copy_(
+            torch.arange(16, dtype=torch.float32).reshape(16, 1, 1, 1).repeat(1, 8, 1, 1)
+        )
+    final_model = nn.Sequential(nn.Conv2d(3, 8, kernel_size=1), nn.Conv2d(8, 8, kernel_size=1))
 
     def load_yolo(checkpoint_path):
         if Path(checkpoint_path) == source_checkpoint:
             return source_wrapper
+        if Path(checkpoint_path) == evidence_checkpoint:
+            raise AssertionError("Filterwise evidence checkpoint must not be loaded for pruning.")
         return SimpleNamespace(model=torch.load(checkpoint_path, weights_only=False))
 
     def prune(model, example_input, layer, indices):
-        assert model is source_model
         assert example_input.shape == (1, 3, 32, 32)
-        assert (layer, indices) == ("0", tuple(range(8)))
-        return pruned_model
+        if layer == "0":
+            assert model is source_model
+            assert indices == tuple(range(8))
+            return after_first_layer
+        assert layer == "1"
+        assert model is after_first_layer
+        assert indices == tuple(range(8))
+        return final_model
 
     monkeypatch.setattr(compression_matrix, "_load_yolo_checkpoint", load_yolo)
     monkeypatch.setattr(compression_matrix, "run_filterwise_probe", prune)
@@ -228,15 +296,23 @@ def test_build_pruned_checkpoint_removes_selected_filters_and_records_reloaded_m
                 "filterwise_manifest": str(manifest),
                 "candidate_layer": "0",
                 "filter_removal_count": 8,
+                "candidate_layers": ["0", "1"],
+                "cluster_size": 8,
+                "prune_ratios": [0.25, 0.5],
+                "allowed_map50_95_drop": 0.02,
+                "importance": "minimum_weight",
             },
         },
         tmp_path / "output",
+        requested_ratio=0.5,
     )
 
     assert output == tmp_path / "output" / "pruned.pt"
     assert output.exists()
-    assert torch.load(output, weights_only=False)[0].out_channels == 8
+    reloaded = torch.load(output, weights_only=False)
+    assert [module.out_channels for module in reloaded] == [8, 8]
     record = json.loads((tmp_path / "output" / "pruning_summary.json").read_text())
-    assert record["before"]["parameter_count"] == 64
-    assert record["after"]["parameter_count"] == 32
+    assert record["before"]["parameter_count"] == 336
+    assert record["after"]["parameter_count"] == 104
     assert record["source_checkpoint"] == str(source_checkpoint)
+    assert record["selected_ratio"] == 0.5
