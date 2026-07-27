@@ -6,6 +6,7 @@ build/**
 **/__pycache__/**
 /models/**
 .superpowers/*
+.worktrees/
 docs/superpowers/*
 
 # Generated model and inference artifacts; retain directory placeholders.
