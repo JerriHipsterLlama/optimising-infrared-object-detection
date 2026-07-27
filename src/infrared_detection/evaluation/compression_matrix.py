@@ -15,13 +15,10 @@ OFFICIAL_PRECISIONS = ("fp32", "fp16", "int8")
 
 
 def _validate_precisions(precisions: Any) -> list[str]:
-    if not isinstance(precisions, list) or not precisions:
-        raise ValueError("precisions must be a non-empty list")
-    invalid = [precision for precision in precisions if precision not in OFFICIAL_PRECISIONS]
-    if invalid:
+    if precisions != list(OFFICIAL_PRECISIONS):
         raise ValueError(
-            "Official precisions are exactly fp32, fp16, and int8; "
-            f"got invalid values: {invalid}"
+            "Official precisions matrix must be exactly the ordered list "
+            "[fp32, fp16, int8]"
         )
     return list(precisions)
 
@@ -50,6 +47,24 @@ def planned_variants(config: Mapping[str, Any]) -> list[dict[str, Any]]:
     candidate_id = pruning.get("candidate_id")
     if pruning_enabled and not isinstance(candidate_id, str):
         raise ValueError("Enabled pruning requires pruning.candidate_id")
+    if pruning_enabled:
+        filterwise_manifest = pruning.get("filterwise_manifest")
+        candidate_layer = pruning.get("candidate_layer")
+        cluster_size = pruning.get("cluster_size")
+        pruning_ratio = pruning.get("pruning_ratio")
+        filter_removal_count = pruning.get("filter_removal_count")
+        if not isinstance(filterwise_manifest, str) or not filterwise_manifest:
+            raise ValueError("Enabled pruning requires pruning.filterwise_manifest")
+        if not isinstance(candidate_layer, str) or not candidate_layer:
+            raise ValueError("Enabled pruning requires pruning.candidate_layer")
+        if not isinstance(cluster_size, int) or isinstance(cluster_size, bool) or cluster_size <= 0:
+            raise ValueError("Enabled pruning requires a positive integer pruning.cluster_size")
+        has_ratio = isinstance(pruning_ratio, (int, float)) and not isinstance(pruning_ratio, bool)
+        has_count = isinstance(filter_removal_count, int) and not isinstance(filter_removal_count, bool)
+        if has_ratio == has_count or (has_ratio and not 0 < pruning_ratio < 1) or (has_count and filter_removal_count <= 0):
+            raise ValueError(
+                "Enabled pruning requires exactly one valid pruning_ratio or filter_removal_count"
+            )
 
     variant_specs = [("dense", None)]
     if pruning_enabled:
@@ -58,17 +73,37 @@ def planned_variants(config: Mapping[str, Any]) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     for variant_name, pruning_candidate_id in variant_specs:
         for precision in precisions:
-            rows.append(
-                {
+            row = {
                     "variant_id": f"{variant_name}-{precision}",
                     "compression": "dense" if pruning_candidate_id is None else "structured_pruning",
                     "precision": precision,
                     "pruning_candidate_id": pruning_candidate_id,
                     "status": "planned",
                     "error": None,
-                    "provenance": {"planner": "compression_matrix", "stage": "planning"},
                 }
-            )
+            if pruning_candidate_id is None:
+                row["provenance"] = {"planner": "compression_matrix", "stage": "planning"}
+            else:
+                provenance = {
+                    "filterwise_manifest": filterwise_manifest,
+                    "candidate_layer": candidate_layer,
+                    "cluster_size": cluster_size,
+                }
+                if pruning_ratio is not None:
+                    provenance["pruning_ratio"] = pruning_ratio
+                else:
+                    provenance["filter_removal_count"] = filter_removal_count
+                row.update(
+                    {
+                        "filterwise_manifest": filterwise_manifest,
+                        "candidate_layer": candidate_layer,
+                        "cluster_size": cluster_size,
+                        "pruning_ratio": pruning_ratio,
+                        "filter_removal_count": filter_removal_count,
+                        "provenance": provenance,
+                    }
+                )
+            rows.append(row)
     return rows
 
 
