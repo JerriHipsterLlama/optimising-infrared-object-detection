@@ -35,7 +35,7 @@ The pre-commit verification also passed `git diff --check` with no output.
 ## Commits
 
 - Implementation and tests: `e94c08370d8bcd6f44c876e0833b1ef8c663afd8` (`Add RTX compression matrix planner`)
-- Report: pending; this report is committed separately after recording the implementation hash.
+- Report initial commit: `a67c0167586c44244432adfb6c9332a3d1cf7c39` (`Document RTX compression matrix task`)
 
 ## Tests run
 
