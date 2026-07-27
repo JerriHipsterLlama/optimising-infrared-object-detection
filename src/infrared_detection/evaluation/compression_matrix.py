@@ -8,10 +8,155 @@ from typing import Any, Mapping
 
 import yaml
 
+from infrared_detection.compression.pruning import compute_channel_importance
+from infrared_detection.compression.pruning.cluster_probe import run_filterwise_probe
 from infrared_detection.evaluation.artifacts import write_experiment_manifest, write_metrics_csv
 
 
 OFFICIAL_PRECISIONS = ("fp32", "fp16", "int8")
+
+
+def select_filterwise_candidate(
+    manifest_path: Path, layer: str, filters_removed: int
+) -> Mapping[str, Any]:
+    """Return the explicit screened-in filterwise candidate for a prune build."""
+
+    try:
+        payload = json.loads(Path(manifest_path).read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ValueError(f"Filterwise manifest is not readable: {manifest_path}") from exc
+
+    rows = payload.get("rows") if isinstance(payload, Mapping) else None
+    if not isinstance(rows, list):
+        raise ValueError("Filterwise manifest has no rows.")
+
+    matches = [
+        row
+        for row in rows
+        if isinstance(row, Mapping)
+        and row.get("layer") == layer
+        and row.get("filters_removed") == filters_removed
+    ]
+    if len(matches) != 1:
+        raise ValueError(
+            f"Filterwise candidate for {layer!r} removing {filters_removed} filters is missing or ambiguous."
+        )
+
+    candidate = matches[0]
+    if candidate.get("status") != "screened_in" or not isinstance(
+        candidate.get("checkpoint_path"), str
+    ) or not candidate["checkpoint_path"]:
+        raise ValueError("Selected filterwise candidate is not usable.")
+    return candidate
+
+
+def _load_yolo_checkpoint(checkpoint_path: Path) -> Any:
+    from ultralytics import YOLO
+
+    return YOLO(str(checkpoint_path))
+
+
+def _unwrap_model(model: Any) -> Any:
+    return getattr(model, "model", model)
+
+
+def _parameter_count(model: Any) -> int:
+    return sum(parameter.numel() for parameter in model.parameters())
+
+
+def _resolve_candidate_checkpoint(manifest_path: Path, checkpoint_path: str) -> Path:
+    path = Path(checkpoint_path)
+    return path if path.is_absolute() else manifest_path.parent / path
+
+
+def build_pruned_checkpoint(config: Mapping[str, Any], output_dir: Path) -> Path:
+    """Build, reload, and record one explicit structured-pruned checkpoint."""
+
+    import torch
+    from torch import nn
+
+    pruning = config.get("pruning")
+    if not isinstance(pruning, Mapping):
+        raise ValueError("pruning must be a mapping")
+    manifest_value = pruning.get("filterwise_manifest")
+    layer = pruning.get("candidate_layer")
+    filters_removed = pruning.get("filter_removal_count")
+    if not isinstance(manifest_value, str) or not manifest_value:
+        raise ValueError("Pruned checkpoint build requires pruning.filterwise_manifest")
+    if not isinstance(layer, str) or not layer:
+        raise ValueError("Pruned checkpoint build requires pruning.candidate_layer")
+    if not isinstance(filters_removed, int) or isinstance(filters_removed, bool) or filters_removed <= 0:
+        raise ValueError("Pruned checkpoint build requires a positive pruning.filter_removal_count")
+
+    manifest_path = Path(manifest_value)
+    candidate = select_filterwise_candidate(manifest_path, layer, filters_removed)
+    source_checkpoint = _resolve_candidate_checkpoint(manifest_path, candidate["checkpoint_path"])
+    if not source_checkpoint.is_file():
+        raise FileNotFoundError(f"Selected filterwise checkpoint does not exist: {source_checkpoint}")
+
+    model_wrapper = _load_yolo_checkpoint(source_checkpoint)
+    model = _unwrap_model(model_wrapper)
+    module = dict(model.named_modules()).get(layer)
+    if not isinstance(module, nn.Conv2d):
+        raise ValueError(f"Configured prune target {layer!r} is not a prunable Conv2d module.")
+    if filters_removed >= int(module.out_channels):
+        raise ValueError(f"Configured prune target {layer!r} cannot remove every output filter.")
+
+    scores = compute_channel_importance(model, criterion="l1")
+    if layer not in scores:
+        raise ValueError(f"No channel-importance scores are available for prunable layer {layer!r}.")
+    prune_indices = tuple(int(index) for index in torch.argsort(scores[layer])[:filters_removed])
+    image_size = int(config.get("experiment", {}).get("image_size", 640))
+    if image_size <= 0:
+        raise ValueError("experiment.image_size must be positive")
+    aligned_image_size = ((image_size + 31) // 32) * 32
+    before = {
+        "parameter_count": _parameter_count(model),
+        "serialized_bytes": source_checkpoint.stat().st_size,
+    }
+    pruned_model = run_filterwise_probe(
+        model,
+        torch.zeros(1, 3, aligned_image_size, aligned_image_size),
+        layer,
+        prune_indices,
+    )
+    if hasattr(model_wrapper, "model"):
+        model_wrapper.model = pruned_model
+    else:
+        model_wrapper = pruned_model
+
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    output_checkpoint = output_dir / "pruned.pt"
+    save = getattr(model_wrapper, "save", None)
+    if not callable(save):
+        raise RuntimeError("Structured-pruned checkpoint requires a save-capable model wrapper.")
+    save(output_checkpoint)
+    if not output_checkpoint.is_file():
+        raise FileNotFoundError(f"Pruned checkpoint was not written: {output_checkpoint}")
+
+    reloaded_model = _unwrap_model(_load_yolo_checkpoint(output_checkpoint))
+    after = {
+        "parameter_count": _parameter_count(reloaded_model),
+        "serialized_bytes": output_checkpoint.stat().st_size,
+    }
+    if after["parameter_count"] >= before["parameter_count"]:
+        raise ValueError("Structured pruning did not reduce parameter count.")
+    (output_dir / "pruning_summary.json").write_text(
+        json.dumps(
+            {
+                "source_checkpoint": str(source_checkpoint),
+                "layer": layer,
+                "filters_removed": filters_removed,
+                "prune_indices": list(prune_indices),
+                "before": before,
+                "after": after,
+            },
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+    return output_checkpoint
 
 
 def _validate_precisions(precisions: Any) -> list[str]:

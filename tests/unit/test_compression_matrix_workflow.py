@@ -1,12 +1,18 @@
 import csv
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
+import torch
+from torch import nn
 
+import infrared_detection.evaluation.compression_matrix as compression_matrix
 from infrared_detection.evaluation.compression_matrix import (
+    build_pruned_checkpoint,
     load_compression_config,
     planned_variants,
+    select_filterwise_candidate,
     write_compression_manifest,
 )
 
@@ -89,12 +95,12 @@ def test_rtx_config_declares_filterwise_candidate_without_inference():
     assert pruning["filterwise_manifest"] == "artifacts/filterwise_rtx_screening/manifest.json"
     assert pruning["candidate_layer"] == "model.8.cv2.conv"
     assert pruning["cluster_size"] == 8
-    assert pruning["pruning_ratio"] == 0.25
+    assert pruning["filter_removal_count"] == 8
     assert planned_variants(config)[3]["provenance"] == {
         "filterwise_manifest": pruning["filterwise_manifest"],
         "candidate_layer": pruning["candidate_layer"],
         "cluster_size": pruning["cluster_size"],
-        "pruning_ratio": pruning["pruning_ratio"],
+        "filter_removal_count": pruning["filter_removal_count"],
     }
 
 
@@ -122,3 +128,115 @@ def test_manifest_writer_keeps_existing_rows_when_checkpoint_is_partial(tmp_path
     payload = json.loads((tmp_path / "manifest.json").read_text())
 
     assert {row["variant_id"] for row in payload["rows"]} == {"dense-fp32", "dense-fp16"}
+
+
+def test_select_filterwise_candidate_requires_matching_layer_and_count(tmp_path):
+    manifest = tmp_path / "filterwise.json"
+    manifest.write_text(
+        json.dumps(
+            {
+                "rows": [
+                    {
+                        "layer": "model.2.cv2.conv",
+                        "filters_removed": 8,
+                        "status": "screened_in",
+                        "checkpoint_path": "candidate.pt",
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    row = select_filterwise_candidate(manifest, "model.2.cv2.conv", 8)
+
+    assert row["checkpoint_path"] == "candidate.pt"
+
+
+def test_select_filterwise_candidate_rejects_failed_row(tmp_path):
+    manifest = tmp_path / "filterwise.json"
+    manifest.write_text(
+        json.dumps(
+            {
+                "rows": [
+                    {
+                        "layer": "model.2.cv2.conv",
+                        "filters_removed": 8,
+                        "status": "failed",
+                        "checkpoint_path": "candidate.pt",
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="not usable"):
+        select_filterwise_candidate(manifest, "model.2.cv2.conv", 8)
+
+
+def test_build_pruned_checkpoint_removes_selected_filters_and_records_reloaded_metrics(
+    monkeypatch, tmp_path
+):
+    source_checkpoint = tmp_path / "candidate.pt"
+    source_model = nn.Sequential(nn.Conv2d(3, 16, kernel_size=1))
+    with torch.no_grad():
+        source_model[0].weight.copy_(
+            torch.arange(16, dtype=torch.float32).reshape(16, 1, 1, 1).repeat(1, 3, 1, 1)
+        )
+    torch.save(source_model, source_checkpoint)
+    manifest = tmp_path / "filterwise.json"
+    manifest.write_text(
+        json.dumps(
+            {
+                "rows": [
+                    {
+                        "layer": "0",
+                        "filters_removed": 8,
+                        "status": "screened_in",
+                        "checkpoint_path": str(source_checkpoint),
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    source_wrapper = SimpleNamespace(model=source_model)
+    source_wrapper.save = lambda path: torch.save(source_wrapper.model, path)
+    pruned_model = nn.Sequential(nn.Conv2d(3, 8, kernel_size=1))
+
+    def load_yolo(checkpoint_path):
+        if Path(checkpoint_path) == source_checkpoint:
+            return source_wrapper
+        return SimpleNamespace(model=torch.load(checkpoint_path, weights_only=False))
+
+    def prune(model, example_input, layer, indices):
+        assert model is source_model
+        assert example_input.shape == (1, 3, 32, 32)
+        assert (layer, indices) == ("0", tuple(range(8)))
+        return pruned_model
+
+    monkeypatch.setattr(compression_matrix, "_load_yolo_checkpoint", load_yolo)
+    monkeypatch.setattr(compression_matrix, "run_filterwise_probe", prune)
+
+    output = build_pruned_checkpoint(
+        {
+            "model": {"checkpoint": str(source_checkpoint)},
+            "experiment": {"image_size": 32},
+            "pruning": {
+                "filterwise_manifest": str(manifest),
+                "candidate_layer": "0",
+                "filter_removal_count": 8,
+            },
+        },
+        tmp_path / "output",
+    )
+
+    assert output == tmp_path / "output" / "pruned.pt"
+    assert output.exists()
+    assert torch.load(output, weights_only=False)[0].out_channels == 8
+    record = json.loads((tmp_path / "output" / "pruning_summary.json").read_text())
+    assert record["before"]["parameter_count"] == 64
+    assert record["after"]["parameter_count"] == 32
+    assert record["source_checkpoint"] == str(source_checkpoint)

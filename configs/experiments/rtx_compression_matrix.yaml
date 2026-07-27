@@ -14,7 +14,7 @@ pruning:
   filterwise_manifest: artifacts/filterwise_rtx_screening/manifest.json
   candidate_layer: model.8.cv2.conv
   cluster_size: 8
-  pruning_ratio: 0.25
+  filter_removal_count: 8
 
 experiment:
   output_dir: runs/experiments/rtx_compression_matrix
