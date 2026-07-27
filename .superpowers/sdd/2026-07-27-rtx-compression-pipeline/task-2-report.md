@@ -47,7 +47,7 @@ $env:PYTHONPATH='src'; ..\..\.venv\Scripts\python.exe -m pytest tests\unit\test_
 
 ## Commits
 
-- Pending commit: Task 2 implementation, tests, configuration update, and this report.
+- `c6a250c` — `Build structured-pruned RTX checkpoint`
 
 ## Concerns
 
