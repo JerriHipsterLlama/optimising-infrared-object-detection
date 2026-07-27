@@ -316,3 +316,75 @@ def test_build_pruned_checkpoint_prunes_dense_source_not_filterwise_evidence(
     assert record["after"]["parameter_count"] == 104
     assert record["source_checkpoint"] == str(source_checkpoint)
     assert record["selected_ratio"] == 0.5
+
+
+def test_build_pruned_checkpoint_skips_zero_cluster_layers_and_prunes_eligible_layers(
+    monkeypatch, tmp_path
+):
+    dense_checkpoint = tmp_path / "dense.pt"
+    dense_model = nn.Sequential(nn.Conv2d(3, 16, kernel_size=1), nn.Conv2d(16, 32, kernel_size=1))
+    with torch.no_grad():
+        dense_model[1].weight.copy_(
+            torch.arange(32, dtype=torch.float32).reshape(32, 1, 1, 1).repeat(1, 16, 1, 1)
+        )
+    torch.save(dense_model, dense_checkpoint)
+    evidence_checkpoint = tmp_path / "evidence.pt"
+    torch.save(nn.Sequential(nn.Conv2d(3, 8, kernel_size=1)), evidence_checkpoint)
+    manifest = tmp_path / "filterwise.json"
+    manifest.write_text(
+        json.dumps(
+            {
+                "rows": [
+                    {
+                        "layer": "0",
+                        "filters_removed": 8,
+                        "status": "screened_in",
+                        "checkpoint_path": str(evidence_checkpoint),
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    dense_wrapper = SimpleNamespace(model=dense_model)
+    dense_wrapper.save = lambda path: torch.save(dense_wrapper.model, path)
+    final_model = nn.Sequential(nn.Conv2d(3, 16, kernel_size=1), nn.Conv2d(16, 24, kernel_size=1))
+
+    def load_yolo(checkpoint_path):
+        if Path(checkpoint_path) == dense_checkpoint:
+            return dense_wrapper
+        if Path(checkpoint_path) == evidence_checkpoint:
+            raise AssertionError("Filterwise evidence checkpoint must not be pruned.")
+        return SimpleNamespace(model=torch.load(checkpoint_path, weights_only=False))
+
+    def prune(model, example_input, layer, indices):
+        assert model is dense_model
+        assert example_input.shape == (1, 3, 32, 32)
+        assert (layer, indices) == ("1", tuple(range(8)))
+        return final_model
+
+    monkeypatch.setattr(compression_matrix, "_load_yolo_checkpoint", load_yolo)
+    monkeypatch.setattr(compression_matrix, "run_filterwise_probe", prune)
+
+    build_pruned_checkpoint(
+        {
+            "model": {"checkpoint": str(dense_checkpoint)},
+            "experiment": {"image_size": 32},
+            "pruning": {
+                "filterwise_manifest": str(manifest),
+                "candidate_layer": "0",
+                "filter_removal_count": 8,
+                "candidate_layers": ["0", "1"],
+                "cluster_size": 8,
+                "prune_ratios": [0.3],
+                "allowed_map50_95_drop": 0.02,
+                "importance": "minimum_weight",
+            },
+        },
+        tmp_path / "output",
+    )
+
+    record = json.loads((tmp_path / "output" / "pruning_summary.json").read_text())
+    assert record["prune_indices"] == {"0": [], "1": list(range(8))}
+    assert record["skipped_layers"] == ["0"]

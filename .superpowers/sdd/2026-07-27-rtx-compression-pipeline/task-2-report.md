@@ -124,3 +124,20 @@ $env:PYTHONPATH='src'; ..\..\.venv\Scripts\python.exe -m pytest tests\unit\test_
 ....................                                                     [100%]
 20 passed in 4.60s
 ```
+
+## Round 2 reviewer fix: zero complete clusters
+
+For a requested ratio that yields zero complete `cluster_size` groups in a configured layer (for example, 16 output filters with cluster size 8 at ratios 0.05–0.30), the builder now records that layer with an empty `prune_indices` list and includes it in `skipped_layers`. It continues pruning every later eligible configured layer. The build raises only when every configured layer yields zero complete clusters, avoiding both whole-candidate failure and silent forced over-pruning.
+
+Regression coverage uses a 16-filter first layer and a 32-filter second layer at ratio 0.30. It verifies that the first layer is recorded as skipped and the second layer removes exactly one low-importance eight-filter cluster.
+
+Exact focused verification:
+
+```powershell
+$env:PYTHONPATH='src'; ..\..\.venv\Scripts\python.exe -m pytest tests\unit\test_compression_matrix_workflow.py tests\unit\test_cluster_selection.py -q
+```
+
+```text
+.....................                                                    [100%]
+21 passed in 4.68s
+```

@@ -161,15 +161,16 @@ def build_pruned_checkpoint(
     }
     pruned_model = model
     planned_clusters: dict[str, list[int]] = {}
+    skipped_layers: list[str] = []
     for layer in candidate_layers:
         module = dict(pruned_model.named_modules()).get(layer)
         if not isinstance(module, nn.Conv2d):
             raise ValueError(f"Configured prune target {layer!r} is not a prunable Conv2d module.")
         clusters_to_remove = int(module.out_channels * selected_ratio) // cluster_size
         if clusters_to_remove <= 0:
-            raise ValueError(
-                f"Configured prune ratio produces no complete clusters for {layer!r}."
-            )
+            planned_clusters[layer] = []
+            skipped_layers.append(layer)
+            continue
         scores = compute_channel_importance(pruned_model, criterion="l1")
         if layer not in scores:
             raise ValueError(f"No channel-importance scores are available for prunable layer {layer!r}.")
@@ -186,6 +187,8 @@ def build_pruned_checkpoint(
             layer,
             prune_indices,
         )
+    if not any(planned_clusters.values()):
+        raise ValueError("Configured prune ratio produces no complete clusters for any candidate layer.")
     if hasattr(model_wrapper, "model"):
         model_wrapper.model = pruned_model
     else:
@@ -220,6 +223,7 @@ def build_pruned_checkpoint(
                 "allowed_map50_95_drop": allowed_map50_95_drop,
                 "importance": importance,
                 "prune_indices": planned_clusters,
+                "skipped_layers": skipped_layers,
                 "before": before,
                 "after": after,
             },
