@@ -26,15 +26,31 @@ def test_tensorrt_command_uses_fp16_flag(monkeypatch, tmp_path):
     assert "--fp16" in commands[0]
 
 
-def test_int8_build_requires_calibration_directory(tmp_path):
+def test_int8_build_requires_calibration_cache(tmp_path):
     with pytest.raises(ValueError, match="calibration"):
         build_tensorrt_engine(tmp_path / "model.onnx", tmp_path / "model.engine", "int8", None, 1024)
 
 
-def test_tensorrt_build_records_command_calibration_and_engine_size(monkeypatch, tmp_path):
+@pytest.mark.parametrize("cache_name", ["calibration", "missing.cache"])
+def test_int8_build_requires_existing_regular_calibration_cache(tmp_path, cache_name):
+    calibration_directory = tmp_path / "calibration"
+    calibration_directory.mkdir()
+    calibration_cache = calibration_directory if cache_name == "calibration" else tmp_path / cache_name
+
+    with pytest.raises(ValueError, match="regular calibration cache file"):
+        build_tensorrt_engine(
+            tmp_path / "model.onnx",
+            tmp_path / "model.engine",
+            "int8",
+            calibration_cache,
+            1024,
+        )
+
+
+def test_tensorrt_build_records_command_calibration_cache_and_engine_size(monkeypatch, tmp_path):
     commands = []
-    calibration_dir = tmp_path / "calibration"
-    calibration_dir.mkdir()
+    calibration_cache = tmp_path / "calibration.cache"
+    calibration_cache.write_bytes(b"calibration-cache")
     engine_path = tmp_path / "model.engine"
 
     def run(command, **kwargs):
@@ -43,12 +59,13 @@ def test_tensorrt_build_records_command_calibration_and_engine_size(monkeypatch,
         return _completed_trtexec("engine built")
 
     monkeypatch.setattr(subprocess, "run", run)
-    result = build_tensorrt_engine(tmp_path / "model.onnx", engine_path, "int8", calibration_dir, 2048)
+    result = build_tensorrt_engine(tmp_path / "model.onnx", engine_path, "int8", calibration_cache, 2048)
 
     assert "--int8" in commands[0]
-    assert f"--calib={calibration_dir}" in commands[0]
+    assert f"--calib={calibration_cache.resolve()}" in commands[0]
     assert result["command"] == commands[0]
-    assert result["calibration_dir"] == str(calibration_dir.resolve())
+    assert result["calibration_cache"] == str(calibration_cache.resolve())
+    assert result["calibration_cache_provenance"] == str(calibration_cache.resolve())
     assert result["engine_size_bytes"] == len(b"built-engine")
 
 
@@ -57,7 +74,7 @@ def test_tensorrt_benchmark_records_latency_percentile_and_fps(monkeypatch, tmp_
     engine_path.write_bytes(b"engine")
     commands = []
     output = (
-        "Latency: min = 7.0 ms, max = 12.0 ms, mean = 8.0 ms, median = 7.5 ms, percentile(99%) = 11.0 ms\n"
+        "Latency: min = 7.0 ms, max = 12.0 ms, mean = 8.0 ms, median = 7.5 ms, percentile(95%) = 10.5 ms\n"
     )
     monkeypatch.setattr("infrared_detection.benchmarking.rtx.shutil.which", lambda name: "trtexec")
     monkeypatch.setattr(subprocess, "run", lambda command, **kwargs: commands.append(command) or _completed_trtexec(output))
@@ -69,7 +86,7 @@ def test_tensorrt_benchmark_records_latency_percentile_and_fps(monkeypatch, tmp_
     assert result["iterations"] == 10
     assert result["warmup"] == 2
     assert result["latency_p50_ms"] == 7.5
-    assert result["latency_p95_ms"] is None
+    assert result["latency_p95_ms"] == 10.5
     assert result["fps"] == pytest.approx(1000 / 7.5)
 
 

@@ -75,3 +75,11 @@ Additional focused RTX-only run:
 - The requested `.venv\Scripts\python.exe` path does not exist inside the linked worktree. The repository-root virtualenv was used instead.
 - That shared virtualenv had the parent checkout on `PYTHONPATH`; the focused tests were rerun with the isolated worktree `src` explicitly selected.
 - No local TensorRT runtime was required or exercised; command construction and output normalization are covered with subprocess/tool lookup test doubles.
+
+## Review-finding fix
+
+- Corrected the INT8 build contract from `calibration_dir` to `calibration_cache: Path | None` in both the adapter and Task 3 brief.
+- INT8 now rejects a missing path or directory and requires an existing regular calibration-cache file before `trtexec` is invoked.
+- `--calib` receives the resolved cache-file path. Build metadata records `calibration_cache` and `calibration_cache_provenance` using that resolved path.
+- Added regression coverage for missing and directory cache paths, cache-file command/provenance metadata, and positive parsing of `percentile(95%)` into `latency_p95_ms`.
+- Verification command: `$env:PYTHONPATH = (Join-Path (Get-Location) 'src'); & '..\\..\\.venv\\Scripts\\python.exe' -m pytest tests\\unit\\test_rtx_benchmarking.py tests\\unit\\test_model_stats.py -q` — `10 passed in 2.49s`.

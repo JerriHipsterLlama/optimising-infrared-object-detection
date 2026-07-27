@@ -28,7 +28,7 @@ def _build_command(
     onnx_path: Path,
     engine_path: Path,
     precision: str,
-    calibration_dir: Path | None,
+    calibration_cache: Path | None,
     workspace_mb: int,
 ) -> list[str]:
     command = [
@@ -40,7 +40,7 @@ def _build_command(
     if precision == "fp16":
         command.append("--fp16")
     elif precision == "int8":
-        command.extend(["--int8", f"--calib={calibration_dir}"])
+        command.extend(["--int8", f"--calib={calibration_cache}"])
     return command
 
 
@@ -48,21 +48,23 @@ def build_tensorrt_engine(
     onnx_path: Path,
     engine_path: Path,
     precision: str,
-    calibration_dir: Path | None,
+    calibration_cache: Path | None,
     workspace_mb: int,
 ) -> dict[str, Any]:
     """Build a local TensorRT engine using the installed ``trtexec`` binary."""
 
     if precision not in {"fp32", "fp16", "int8"}:
         raise ValueError("precision must be one of: fp32, fp16, int8")
-    if precision == "int8" and calibration_dir is None:
-        raise ValueError("INT8 TensorRT builds require a calibration directory")
+    if precision == "int8" and calibration_cache is None:
+        raise ValueError("INT8 TensorRT builds require a calibration cache file")
     if workspace_mb <= 0:
         raise ValueError("workspace_mb must be positive")
 
     onnx = Path(onnx_path)
     engine = Path(engine_path)
-    calibration = Path(calibration_dir).resolve() if calibration_dir is not None else None
+    calibration = Path(calibration_cache).resolve() if calibration_cache is not None else None
+    if precision == "int8" and (calibration is None or not calibration.is_file()):
+        raise ValueError("INT8 TensorRT builds require an existing regular calibration cache file")
     command = _build_command(shutil.which("trtexec") or "trtexec", onnx, engine, precision, calibration, workspace_mb)
     try:
         completed = subprocess.run(command, capture_output=True, text=True, check=True)
@@ -81,8 +83,8 @@ def build_tensorrt_engine(
         "onnx_path": str(onnx.resolve()),
         "engine_path": str(resolved_engine),
         "engine_size_bytes": resolved_engine.stat().st_size,
-        "calibration_dir": str(calibration) if calibration is not None else None,
-        "calibration_provenance": str(calibration) if calibration is not None else None,
+        "calibration_cache": str(calibration) if calibration is not None else None,
+        "calibration_cache_provenance": str(calibration) if calibration is not None else None,
         "workspace_mb": int(workspace_mb),
         "stdout": completed.stdout,
         "stderr": completed.stderr,
