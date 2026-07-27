@@ -17,18 +17,17 @@ from infrared_detection.evaluation.compression_matrix import (
 )
 
 
-def test_planned_variants_include_dense_and_pruned_precision_matrix():
+def test_matrix_planner_creates_three_dense_and_three_rows_per_prune_ratio():
     rows = planned_variants(
         {
             "pruning": {
                 "enabled": True,
-                "candidate_id": "cluster-8-ratio-0.25",
                 "filterwise_manifest": "artifacts/filterwise_rtx_screening/manifest.json",
-                "candidate_layer": "model.8.cv2.conv",
+                "evidence_layer": "model.8.cv2.conv",
                 "candidate_layers": ["model.8.cv2.conv"],
                 "cluster_size": 8,
-                "filter_removal_count": 8,
-                "prune_ratios": [0.05, 0.25],
+                "evidence_filters_removed": 8,
+                "prune_ratios": [0.05, 0.10],
                 "allowed_map50_95_drop": 0.02,
                 "importance": "minimum_weight",
             },
@@ -40,20 +39,25 @@ def test_planned_variants_include_dense_and_pruned_precision_matrix():
         "dense-fp32",
         "dense-fp16",
         "dense-int8",
-        "cluster-8-ratio-0.25-fp32",
-        "cluster-8-ratio-0.25-fp16",
-        "cluster-8-ratio-0.25-int8",
+        "cluster-8-ratio-0.05-fp32",
+        "cluster-8-ratio-0.05-fp16",
+        "cluster-8-ratio-0.05-int8",
+        "cluster-8-ratio-0.1-fp32",
+        "cluster-8-ratio-0.1-fp16",
+        "cluster-8-ratio-0.1-int8",
     ]
+    assert len(rows) == 9
+    assert "cluster-8-ratio-0.05-fp16" in {row["variant_id"] for row in rows}
     assert all(row["status"] == "planned" for row in rows)
     assert all("provenance" in row for row in rows)
     pruned = rows[3]
     assert pruned["provenance"] == {
         "filterwise_manifest": "artifacts/filterwise_rtx_screening/manifest.json",
-        "candidate_layer": "model.8.cv2.conv",
+        "evidence_layer": "model.8.cv2.conv",
         "candidate_layers": ["model.8.cv2.conv"],
         "cluster_size": 8,
-        "filter_removal_count": 8,
-        "prune_ratios": [0.05, 0.25],
+        "evidence_filters_removed": 8,
+        "prune_ratio": 0.05,
         "allowed_map50_95_drop": 0.02,
         "importance": "minimum_weight",
     }
@@ -94,14 +98,14 @@ def test_load_compression_config_rejects_incomplete_precision_matrix(tmp_path):
         load_compression_config(config_path)
 
 
-def test_rtx_config_declares_filterwise_candidate_without_inference():
+def test_rtx_config_declares_filterwise_evidence_without_inference():
     config_path = Path("configs/experiments/rtx_compression_matrix.yaml")
 
     config = load_compression_config(config_path)
     pruning = config["pruning"]
 
     assert pruning["filterwise_manifest"] == "artifacts/filterwise_rtx_screening/manifest.json"
-    assert pruning["candidate_layer"] == "model.8.cv2.conv"
+    assert pruning["evidence_layer"] == "model.8.cv2.conv"
     assert pruning["candidate_layers"] == [
         "model.0.conv",
         "model.2.cv2.conv",
@@ -110,17 +114,17 @@ def test_rtx_config_declares_filterwise_candidate_without_inference():
         "model.8.cv2.conv",
     ]
     assert pruning["cluster_size"] == 8
-    assert pruning["filter_removal_count"] == 8
+    assert pruning["evidence_filters_removed"] == 8
     assert pruning["prune_ratios"] == [0.05, 0.10, 0.15, 0.20, 0.25, 0.30]
     assert pruning["allowed_map50_95_drop"] == 0.02
     assert pruning["importance"] == "minimum_weight"
     assert planned_variants(config)[3]["provenance"] == {
         "filterwise_manifest": pruning["filterwise_manifest"],
-        "candidate_layer": pruning["candidate_layer"],
+        "evidence_layer": pruning["evidence_layer"],
         "candidate_layers": pruning["candidate_layers"],
         "cluster_size": pruning["cluster_size"],
-        "filter_removal_count": pruning["filter_removal_count"],
-        "prune_ratios": pruning["prune_ratios"],
+        "evidence_filters_removed": pruning["evidence_filters_removed"],
+        "prune_ratio": 0.05,
         "allowed_map50_95_drop": pruning["allowed_map50_95_drop"],
         "importance": pruning["importance"],
     }
@@ -139,10 +143,9 @@ def test_rtx_config_declares_filterwise_candidate_without_inference():
 def test_planned_variants_requires_explicit_cluster_pruning_contract(field, value, message):
     pruning = {
         "enabled": True,
-        "candidate_id": "cluster-8-ratio-0.25",
         "filterwise_manifest": "filterwise.json",
-        "candidate_layer": "model.2.conv",
-        "filter_removal_count": 8,
+        "evidence_layer": "model.2.conv",
+        "evidence_filters_removed": 8,
         "candidate_layers": ["model.2.conv"],
         "cluster_size": 8,
         "prune_ratios": [0.05, 0.25],
@@ -294,8 +297,8 @@ def test_build_pruned_checkpoint_prunes_dense_source_not_filterwise_evidence(
             "experiment": {"image_size": 32},
             "pruning": {
                 "filterwise_manifest": str(manifest),
-                "candidate_layer": "0",
-                "filter_removal_count": 8,
+                "evidence_layer": "0",
+                "evidence_filters_removed": 8,
                 "candidate_layers": ["0", "1"],
                 "cluster_size": 8,
                 "prune_ratios": [0.25, 0.5],
@@ -373,8 +376,8 @@ def test_build_pruned_checkpoint_skips_zero_cluster_layers_and_prunes_eligible_l
             "experiment": {"image_size": 32},
             "pruning": {
                 "filterwise_manifest": str(manifest),
-                "candidate_layer": "0",
-                "filter_removal_count": 8,
+                "evidence_layer": "0",
+                "evidence_filters_removed": 8,
                 "candidate_layers": ["0", "1"],
                 "cluster_size": 8,
                 "prune_ratios": [0.3],

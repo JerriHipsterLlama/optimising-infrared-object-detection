@@ -24,3 +24,16 @@ def test_cluster_pruning_app_exposes_filterwise_mode():
     assert result.returncode == 0, result.stderr
     assert "--filterwise" in result.stdout
     assert "--full-curve" in result.stdout
+
+
+def test_matrix_app_exposes_config_and_dry_run():
+    result = subprocess.run(
+        [sys.executable, "apps/evaluate_compression_matrix.py", "--help"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "--config" in result.stdout
+    assert "--dry-run" in result.stdout
