@@ -37,40 +37,6 @@ def _validate_allowed_map_drop(value: Any, context: str) -> float:
     return float(value)
 
 
-def select_filterwise_candidate(
-    manifest_path: Path, layer: str, filters_removed: int
-) -> Mapping[str, Any]:
-    """Return the explicit screened-in filterwise candidate for a prune build."""
-
-    try:
-        payload = json.loads(Path(manifest_path).read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
-        raise ValueError(f"Filterwise manifest is not readable: {manifest_path}") from exc
-
-    rows = payload.get("rows") if isinstance(payload, Mapping) else None
-    if not isinstance(rows, list):
-        raise ValueError("Filterwise manifest has no rows.")
-
-    matches = [
-        row
-        for row in rows
-        if isinstance(row, Mapping)
-        and row.get("layer") == layer
-        and row.get("filters_removed") == filters_removed
-    ]
-    if len(matches) != 1:
-        raise ValueError(
-            f"Filterwise candidate for {layer!r} removing {filters_removed} filters is missing or ambiguous."
-        )
-
-    candidate = matches[0]
-    if candidate.get("status") != "screened_in" or not isinstance(
-        candidate.get("checkpoint_path"), str
-    ) or not candidate["checkpoint_path"]:
-        raise ValueError("Selected filterwise candidate is not usable.")
-    return candidate
-
-
 def _load_yolo_checkpoint(checkpoint_path: Path) -> Any:
     from ultralytics import YOLO
 
@@ -85,11 +51,6 @@ def _parameter_count(model: Any) -> int:
     return sum(parameter.numel() for parameter in model.parameters())
 
 
-def _resolve_candidate_checkpoint(manifest_path: Path, checkpoint_path: str) -> Path:
-    path = Path(checkpoint_path)
-    return path if path.is_absolute() else manifest_path.parent / path
-
-
 def build_pruned_checkpoint(
     config: Mapping[str, Any], output_dir: Path, requested_ratio: float | None = None
 ) -> Path:
@@ -101,9 +62,6 @@ def build_pruned_checkpoint(
     pruning = config.get("pruning")
     if not isinstance(pruning, Mapping):
         raise ValueError("pruning must be a mapping")
-    manifest_value = pruning.get("filterwise_manifest")
-    evidence_layer = pruning.get("evidence_layer")
-    filters_removed = pruning.get("evidence_filters_removed")
     candidate_layers = pruning.get("candidate_layers")
     cluster_size = pruning.get("cluster_size")
     prune_ratios = _validate_prune_ratios(pruning.get("prune_ratios"), "Pruned checkpoint build")
@@ -111,12 +69,6 @@ def build_pruned_checkpoint(
         pruning.get("allowed_map50_95_drop"), "Pruned checkpoint build"
     )
     importance = pruning.get("importance")
-    if not isinstance(manifest_value, str) or not manifest_value:
-        raise ValueError("Pruned checkpoint build requires pruning.filterwise_manifest")
-    if not isinstance(evidence_layer, str) or not evidence_layer:
-        raise ValueError("Pruned checkpoint build requires pruning.evidence_layer")
-    if not isinstance(filters_removed, int) or isinstance(filters_removed, bool) or filters_removed <= 0:
-        raise ValueError("Pruned checkpoint build requires a positive pruning.evidence_filters_removed")
     if not isinstance(candidate_layers, list) or not candidate_layers or not all(
         isinstance(layer, str) and layer for layer in candidate_layers
     ):
@@ -125,8 +77,6 @@ def build_pruned_checkpoint(
         raise ValueError("Pruned checkpoint build requires a positive pruning.cluster_size")
     if importance != "minimum_weight":
         raise ValueError("Pruned checkpoint build requires pruning.importance='minimum_weight'")
-    if filters_removed != cluster_size:
-        raise ValueError("Filterwise evidence_filters_removed must equal pruning.cluster_size")
     if requested_ratio is None:
         if len(prune_ratios) != 1:
             raise ValueError("Pruned checkpoint build requires an explicit requested_ratio from pruning.prune_ratios")
@@ -140,11 +90,6 @@ def build_pruned_checkpoint(
     else:
         selected_ratio = float(requested_ratio)
 
-    manifest_path = _resolve_repo_path(manifest_value)
-    candidate = select_filterwise_candidate(manifest_path, evidence_layer, filters_removed)
-    evidence_checkpoint = _resolve_candidate_checkpoint(manifest_path, candidate["checkpoint_path"])
-    if not evidence_checkpoint.is_file():
-        raise FileNotFoundError(f"Selected filterwise evidence checkpoint does not exist: {evidence_checkpoint}")
     model_config = config.get("model")
     if not isinstance(model_config, Mapping) or not isinstance(model_config.get("checkpoint"), str):
         raise ValueError("Pruned checkpoint build requires model.checkpoint")
@@ -218,9 +163,6 @@ def build_pruned_checkpoint(
         json.dumps(
             {
                 "source_checkpoint": str(source_checkpoint),
-                "filterwise_evidence_checkpoint": str(evidence_checkpoint),
-                "evidence_layer": evidence_layer,
-                "evidence_filters_removed": filters_removed,
                 "candidate_layers": candidate_layers,
                 "cluster_size": cluster_size,
                 "selected_ratio": selected_ratio,
@@ -270,30 +212,19 @@ def planned_variants(config: Mapping[str, Any]) -> list[dict[str, Any]]:
         raise ValueError("pruning must be a mapping")
     pruning_enabled = bool(pruning.get("enabled", False))
     if pruning_enabled:
-        filterwise_manifest = pruning.get("filterwise_manifest")
-        evidence_layer = pruning.get("evidence_layer")
         candidate_layers = pruning.get("candidate_layers")
         cluster_size = pruning.get("cluster_size")
         prune_ratios = _validate_prune_ratios(pruning.get("prune_ratios"), "Enabled pruning")
-        evidence_filters_removed = pruning.get("evidence_filters_removed")
         allowed_map50_95_drop = _validate_allowed_map_drop(
             pruning.get("allowed_map50_95_drop"), "Enabled pruning"
         )
         importance = pruning.get("importance")
-        if not isinstance(filterwise_manifest, str) or not filterwise_manifest:
-            raise ValueError("Enabled pruning requires pruning.filterwise_manifest")
-        if not isinstance(evidence_layer, str) or not evidence_layer:
-            raise ValueError("Enabled pruning requires pruning.evidence_layer")
         if not isinstance(candidate_layers, list) or not candidate_layers or not all(
             isinstance(layer, str) and layer for layer in candidate_layers
         ):
             raise ValueError("Enabled pruning requires non-empty pruning.candidate_layers")
         if not isinstance(cluster_size, int) or isinstance(cluster_size, bool) or cluster_size <= 0:
             raise ValueError("Enabled pruning requires a positive integer pruning.cluster_size")
-        if not isinstance(evidence_filters_removed, int) or isinstance(evidence_filters_removed, bool) or evidence_filters_removed <= 0:
-            raise ValueError("Enabled pruning requires a positive pruning.evidence_filters_removed")
-        if evidence_filters_removed != cluster_size:
-            raise ValueError("Enabled pruning requires evidence removal count equal to pruning.cluster_size")
         if importance != "minimum_weight":
             raise ValueError("Enabled pruning requires pruning.importance='minimum_weight'")
 
@@ -316,24 +247,18 @@ def planned_variants(config: Mapping[str, Any]) -> list[dict[str, Any]]:
                 row["provenance"] = {"planner": "compression_matrix", "stage": "planning"}
             else:
                 provenance = {
-                    "filterwise_manifest": filterwise_manifest,
-                    "evidence_layer": evidence_layer,
                     "candidate_layers": candidate_layers,
                     "cluster_size": cluster_size,
-                    "evidence_filters_removed": evidence_filters_removed,
                     "prune_ratio": prune_ratio,
                     "allowed_map50_95_drop": allowed_map50_95_drop,
                     "importance": importance,
                 }
                 row.update(
                     {
-                        "filterwise_manifest": filterwise_manifest,
-                        "evidence_layer": evidence_layer,
                         "candidate_layers": candidate_layers,
                         "cluster_size": cluster_size,
                         "prune_ratio": prune_ratio,
                         "allowed_map50_95_drop": allowed_map50_95_drop,
-                        "evidence_filters_removed": evidence_filters_removed,
                         "importance": importance,
                         "provenance": provenance,
                     }
