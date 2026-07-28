@@ -29,4 +29,6 @@ experiment:
 
 runtime:
   device: rtx
-  evaluation_device: "0"
+  # Ultralytics' TensorRT backend maps the CPU selector to CUDA for .engine files.
+  # This avoids the intermittent PyTorch numeric-device visibility failure on Windows.
+  evaluation_device: cpu

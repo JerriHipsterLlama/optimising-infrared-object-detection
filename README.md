@@ -146,6 +146,8 @@ python apps/evaluate_compression_matrix.py --config configs/experiments/rtx_comp
 
 The run writes `manifest.json` and `results.csv` under `runs/experiments/rtx_compression_matrix/`. It records one row per precision and ratio, continues after individual failures, and selects the highest completed structured-pruning FP32 ratio within `pruning.allowed_map50_95_drop` of the dense FP32 baseline. RTX results are preliminary screening evidence; final deployment claims must be measured on the Jetson Orin Nano.
 
+The compression-matrix `runtime.evaluation_device` is intentionally `cpu` for TensorRT engine validation on Windows. Ultralytics' TensorRT backend uses this selector to initialize the `.engine` on CUDA while avoiding intermittent PyTorch numeric-device visibility failures; latency is still measured with the raw TensorRT engine through `trtexec`.
+
 TensorRT 11.1 no longer accepts the legacy `trtexec --fp16`, `--int8`, and `--calib` flags. FP16 is prepared through the ModelOpt autocast boundary before engine building. INT8 is intentionally excluded from the current configuration and will require a separate ModelOpt calibration-data workflow.
 
 ## Repository layout

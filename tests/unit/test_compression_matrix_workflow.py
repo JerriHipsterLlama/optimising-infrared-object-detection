@@ -124,7 +124,7 @@ def test_rtx_config_declares_filterwise_evidence_without_inference():
     assert pruning["allowed_map50_95_drop"] == 0.02
     assert pruning["importance"] == "minimum_weight"
     assert config["precisions"] == ["fp32", "fp16"]
-    assert config["runtime"]["evaluation_device"] == "0"
+    assert config["runtime"]["evaluation_device"] == "cpu"
     assert config["experiment"]["image_size"] == 352
     assert planned_variants(config)[3]["provenance"] == {
         "filterwise_manifest": pruning["filterwise_manifest"],
