@@ -6,15 +6,13 @@ data:
   dataset_yaml: data/camel/camel.yaml
   calibration_image_dir: data/camel/images/train
 
-precisions: [fp32, fp16, int8]
+precisions: [fp32, fp16]
 
 pruning:
   enabled: true
-  filterwise_manifest: artifacts/filterwise_rtx_screening/manifest.json
-  evidence_layer: model.8.cv2.conv
+  filterwise_manifest: runs/experiments/filterwise_rtx_screening/manifest.json
+  evidence_layer: model.6.cv2.conv
   candidate_layers:
-    - model.0.conv
-    - model.2.cv2.conv
     - model.4.cv2.conv
     - model.6.cv2.conv
     - model.8.cv2.conv
@@ -26,7 +24,9 @@ pruning:
 
 experiment:
   output_dir: runs/experiments/rtx_compression_matrix
+  image_size: 352
   seed: 7
 
 runtime:
   device: rtx
+  evaluation_device: "0"

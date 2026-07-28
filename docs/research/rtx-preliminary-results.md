@@ -6,13 +6,14 @@ This workflow provides preliminary local measurements before final validation on
 
 The configured experiment contains:
 
-- dense FP32, FP16, and INT8 baselines;
+- dense FP32 and FP16 baselines;
 - structured pruning with cluster size 8;
-- candidate layers `model.0.conv`, `model.2.cv2.conv`, `model.4.cv2.conv`, `model.6.cv2.conv`, and `model.8.cv2.conv`;
+- candidate layers `model.4.cv2.conv`, `model.6.cv2.conv`, and `model.8.cv2.conv`;
 - prune ratios 0.05, 0.10, 0.15, 0.20, 0.25, and 0.30;
-- FP32, FP16, and INT8 exports for every pruning ratio.
+- FP32 and FP16 exports for every pruning ratio;
+- input size 352 × 352.
 
-This produces 21 planned rows. Each pruned checkpoint is created from the dense checkpoint and reused across the three precision exports. The filterwise experiment supplies cluster-size evidence; it does not become the source checkpoint for the final structured-pruning candidates.
+This produces 14 planned rows. Each pruned checkpoint is created from the dense checkpoint and reused across the two precision exports. The filterwise experiment supplies cluster-size evidence; it does not become the source checkpoint for the final structured-pruning candidates.
 
 ## Where to read the results
 
@@ -25,7 +26,7 @@ After the run, inspect:
 
 For the main comparison, use the dense FP32 row as the accuracy and latency reference. Plot `prune_ratio` against `map50_95`, `latency_p50_ms`/`latency_p95_ms`, and engine size. The selected candidate is the highest completed structured-pruning FP32 ratio whose mAP50-95 remains within `pruning.allowed_map50_95_drop` of dense FP32. Precision rows then show the deployment trade-off for that same checkpoint.
 
-Rows with `status=failed` should be retained in the report with their error. In particular, INT8 rows remain incomplete until a valid TensorRT calibration-cache file is configured. Do not replace a failed measurement with an estimate.
+Rows with `status=failed` should be retained in the report with their error. INT8 is not part of this snapshot; it will be added only after the TensorRT 11.1 ModelOpt calibration workflow is validated. Do not replace a failed measurement with an estimate.
 
 ## Reproducibility
 

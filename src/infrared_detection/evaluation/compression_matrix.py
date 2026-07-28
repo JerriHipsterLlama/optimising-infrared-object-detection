@@ -140,7 +140,7 @@ def build_pruned_checkpoint(
     else:
         selected_ratio = float(requested_ratio)
 
-    manifest_path = Path(manifest_value)
+    manifest_path = _resolve_repo_path(manifest_value)
     candidate = select_filterwise_candidate(manifest_path, evidence_layer, filters_removed)
     evidence_checkpoint = _resolve_candidate_checkpoint(manifest_path, candidate["checkpoint_path"])
     if not evidence_checkpoint.is_file():
@@ -148,7 +148,7 @@ def build_pruned_checkpoint(
     model_config = config.get("model")
     if not isinstance(model_config, Mapping) or not isinstance(model_config.get("checkpoint"), str):
         raise ValueError("Pruned checkpoint build requires model.checkpoint")
-    source_checkpoint = Path(model_config["checkpoint"])
+    source_checkpoint = _resolve_repo_path(model_config["checkpoint"])
     if not source_checkpoint.is_file():
         raise FileNotFoundError(f"Dense model checkpoint does not exist: {source_checkpoint}")
 
@@ -240,9 +240,9 @@ def build_pruned_checkpoint(
 
 
 def _validate_precisions(precisions: Any) -> list[str]:
-    if precisions != list(OFFICIAL_PRECISIONS):
+    if precisions not in (list(OFFICIAL_PRECISIONS[:2]), list(OFFICIAL_PRECISIONS)):
         raise ValueError(
-            "Official precisions matrix must be exactly the ordered list "
+            "Precision matrix must be the ordered list [fp32, fp16] or "
             "[fp32, fp16, int8]"
         )
     return list(precisions)
@@ -450,6 +450,16 @@ def _workspace_mb(config: Mapping[str, Any]) -> int:
     return value
 
 
+def _evaluation_device(config: Mapping[str, Any]) -> str:
+    runtime = config.get("runtime", {})
+    value = runtime.get("evaluation_device", runtime.get("device", "0")) if isinstance(runtime, Mapping) else "0"
+    if value == "rtx":
+        value = "0"
+    if not isinstance(value, (str, int)) or isinstance(value, bool):
+        raise ValueError("runtime.evaluation_device must be '0', a CUDA device index, or 'cpu'")
+    return str(value)
+
+
 def _row_provenance(config_path: Path, checkpoint: Path, config: Mapping[str, Any]) -> dict[str, Any]:
     calibration_cache = _calibration_cache(config)
     return {
@@ -627,7 +637,7 @@ def run_compression_matrix(
             )
             if not engine.is_file():
                 raise FileNotFoundError(f"TensorRT engine was not written: {engine}")
-            metrics = dict(active.evaluate_engine(engine, config, str(config.get("runtime", {}).get("device", "0"))))
+            metrics = dict(active.evaluate_engine(engine, config, _evaluation_device(config)))
             benchmark = dict(active.benchmark_engine(engine, "rtx3070"))
             _record_paths(row, variant_checkpoint, onnx, engine)
             row.update({key: value for key, value in metrics.items() if key != "precision"})
@@ -670,10 +680,17 @@ def _export_checkpoint_to_onnx(checkpoint: Path, config: Mapping[str, Any], outp
 def _build_rtx_engine(
     onnx: Path, engine: Path, precision: str, calibration_cache: Path | None, workspace_mb: int
 ) -> Mapping[str, Any]:
-    from infrared_detection.benchmarking.rtx import build_tensorrt_engine
+    from infrared_detection.benchmarking.rtx import (
+        build_tensorrt_engine,
+        prepare_tensorrt_precision_onnx,
+    )
 
     engine.parent.mkdir(parents=True, exist_ok=True)
-    return build_tensorrt_engine(onnx, engine, precision, calibration_cache, workspace_mb)
+    prepared_onnx = onnx if precision == "fp32" else engine.parent / f"{onnx.stem}.{precision}.onnx"
+    preparation = prepare_tensorrt_precision_onnx(onnx, prepared_onnx, precision)
+    build = build_tensorrt_engine(prepared_onnx, engine, precision, calibration_cache, workspace_mb)
+    build["precision_preparation"] = preparation
+    return build
 
 
 def _evaluate_engine_accuracy(
@@ -685,6 +702,14 @@ def _evaluate_engine_accuracy(
     if not isinstance(data, Mapping) or not isinstance(data.get("dataset_yaml"), str):
         raise ValueError("Compression matrix requires data.dataset_yaml")
     runtime = config.get("runtime", {})
+    if device != "cpu":
+        import torch
+
+        if not torch.cuda.is_available() or torch.cuda.device_count() == 0:
+            raise RuntimeError(
+                f"Evaluation requested on CUDA device {device!r}, but PyTorch cannot see a CUDA device. "
+                "Check CUDA_VISIBLE_DEVICES and the installed PyTorch CUDA runtime."
+            )
     wrapper = _load_yolo_checkpoint(engine)
     return evaluate_yolo(
         wrapper,

@@ -128,7 +128,7 @@ Merge native results for every final global candidate before reading `selected_c
 
 ### RTX compression-matrix screening
 
-The local RTX workflow builds and evaluates dense and structured-pruned TensorRT variants. The pruning variants always start from the dense checkpoint; the filterwise manifest is used as evidence for the chosen cluster size, not as the pruning input. The current matrix tests the recommended candidate layers, cluster size 8, and ratios 0.05 through 0.30.
+The local RTX workflow builds and evaluates dense and structured-pruned TensorRT variants. The pruning variants always start from the dense checkpoint; the filterwise manifest is used as evidence for the chosen cluster size, not as the pruning input. The current matrix tests FP32 and FP16 at input size 352, the recommended candidate layers, cluster size 8, and ratios 0.05 through 0.30. INT8 is deferred while the TensorRT 11.1 ModelOpt workflow is developed.
 
 Run a planning check first:
 
@@ -146,7 +146,7 @@ python apps/evaluate_compression_matrix.py --config configs/experiments/rtx_comp
 
 The run writes `manifest.json` and `results.csv` under `runs/experiments/rtx_compression_matrix/`. It records one row per precision and ratio, continues after individual failures, and selects the highest completed structured-pruning FP32 ratio within `pruning.allowed_map50_95_drop` of the dense FP32 baseline. RTX results are preliminary screening evidence; final deployment claims must be measured on the Jetson Orin Nano.
 
-INT8 requires a real TensorRT calibration-cache file. Set `runtime.calibration_cache` to that file before running the complete matrix; the configured calibration image directory is source data for creating the cache and is not itself passed to `trtexec` as a cache.
+TensorRT 11.1 no longer accepts the legacy `trtexec --fp16`, `--int8`, and `--calib` flags. FP16 is prepared through the ModelOpt autocast boundary before engine building. INT8 is intentionally excluded from the current configuration and will require a separate ModelOpt calibration-data workflow.
 
 ## Repository layout
 

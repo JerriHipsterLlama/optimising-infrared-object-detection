@@ -64,17 +64,23 @@ def test_matrix_planner_creates_three_dense_and_three_rows_per_prune_ratio():
 
 
 def test_planned_variants_reject_non_official_precision():
-    with pytest.raises(ValueError, match="Official precisions"):
+    with pytest.raises(ValueError, match="Precision matrix"):
         planned_variants({"precisions": ["fp32", "int4"]})
 
 
 @pytest.mark.parametrize(
     "precisions",
-    [["fp32", "fp16"], ["fp32", "fp16", "int8", "int8"], ["int8", "fp16", "fp32"]],
+    [["fp32"], ["fp32", "fp16", "int8", "int8"], ["int8", "fp16", "fp32"]],
 )
 def test_precision_matrix_requires_exact_ordered_official_set(precisions):
-    with pytest.raises(ValueError, match="exactly.*ordered"):
+    with pytest.raises(ValueError, match="Precision matrix"):
         planned_variants({"precisions": precisions})
+
+
+def test_precision_matrix_accepts_fp32_fp16_only():
+    rows = planned_variants({"precisions": ["fp32", "fp16"]})
+
+    assert [row["variant_id"] for row in rows] == ["dense-fp32", "dense-fp16"]
 
 
 def test_load_compression_config_reads_yaml(tmp_path):
@@ -90,12 +96,13 @@ def test_load_compression_config_reads_yaml(tmp_path):
     assert config["_config_path"] == str(config_path.resolve())
 
 
-def test_load_compression_config_rejects_incomplete_precision_matrix(tmp_path):
+def test_load_compression_config_accepts_fp32_fp16_matrix(tmp_path):
     config_path = tmp_path / "compression.yaml"
     config_path.write_text("precisions: [fp32, fp16]\n", encoding="utf-8")
 
-    with pytest.raises(ValueError, match="exactly.*ordered"):
-        load_compression_config(config_path)
+    config = load_compression_config(config_path)
+
+    assert config["precisions"] == ["fp32", "fp16"]
 
 
 def test_rtx_config_declares_filterwise_evidence_without_inference():
@@ -104,11 +111,9 @@ def test_rtx_config_declares_filterwise_evidence_without_inference():
     config = load_compression_config(config_path)
     pruning = config["pruning"]
 
-    assert pruning["filterwise_manifest"] == "artifacts/filterwise_rtx_screening/manifest.json"
-    assert pruning["evidence_layer"] == "model.8.cv2.conv"
+    assert pruning["filterwise_manifest"] == "runs/experiments/filterwise_rtx_screening/manifest.json"
+    assert pruning["evidence_layer"] == "model.6.cv2.conv"
     assert pruning["candidate_layers"] == [
-        "model.0.conv",
-        "model.2.cv2.conv",
         "model.4.cv2.conv",
         "model.6.cv2.conv",
         "model.8.cv2.conv",
@@ -118,6 +123,9 @@ def test_rtx_config_declares_filterwise_evidence_without_inference():
     assert pruning["prune_ratios"] == [0.05, 0.10, 0.15, 0.20, 0.25, 0.30]
     assert pruning["allowed_map50_95_drop"] == 0.02
     assert pruning["importance"] == "minimum_weight"
+    assert config["precisions"] == ["fp32", "fp16"]
+    assert config["runtime"]["evaluation_device"] == "0"
+    assert config["experiment"]["image_size"] == 352
     assert planned_variants(config)[3]["provenance"] == {
         "filterwise_manifest": pruning["filterwise_manifest"],
         "evidence_layer": pruning["evidence_layer"],

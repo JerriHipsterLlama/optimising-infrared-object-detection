@@ -5,12 +5,71 @@ from __future__ import annotations
 import re
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 from typing import Any
 
 
 class RtxToolsUnavailable(RuntimeError):
     """Raised when a local RTX benchmark cannot find TensorRT's trtexec tool."""
+
+
+def prepare_tensorrt_precision_onnx(
+    onnx_path: Path, output_path: Path, precision: str
+) -> dict[str, Any]:
+    """Prepare an ONNX graph for TensorRT 11.1 precision handling.
+
+    TensorRT 11.1 removed the legacy ``trtexec --fp16`` and ``--int8``
+    switches. FP16 is therefore represented explicitly in the ONNX graph by
+    ModelOpt before ``trtexec`` builds the engine. INT8 is intentionally
+    deferred until the matrix has an approved ModelOpt calibration workflow.
+    """
+
+    if precision not in {"fp32", "fp16", "int8"}:
+        raise ValueError("precision must be one of: fp32, fp16, int8")
+    onnx = Path(onnx_path)
+    output = Path(output_path)
+    if precision == "fp32":
+        return {
+            "precision": precision,
+            "input_path": str(onnx.resolve()),
+            "output_path": str(onnx.resolve()),
+            "command": None,
+        }
+    if precision == "int8":
+        raise ValueError("INT8 TensorRT 11.1 support is deferred until ModelOpt calibration is configured")
+
+    output.parent.mkdir(parents=True, exist_ok=True)
+    command = [
+        sys.executable,
+        "-m",
+        "modelopt.onnx.autocast",
+        "--onnx_path",
+        str(onnx),
+        "--output_path",
+        str(output),
+    ]
+    try:
+        completed = subprocess.run(command, capture_output=True, text=True, check=True)
+    except FileNotFoundError as exc:
+        raise RtxToolsUnavailable("The Python runtime could not launch ModelOpt FP16 autocast.") from exc
+    except subprocess.CalledProcessError as exc:
+        detail = (exc.stderr or exc.stdout or "").strip()
+        suffix = f" Output: {detail[-1000:]}" if detail else ""
+        raise RuntimeError(
+            "ModelOpt FP16 autocast failed. Install NVIDIA ModelOpt and verify its ONNX dependencies."
+            + suffix
+        ) from exc
+    if not output.is_file():
+        raise RuntimeError(f"ModelOpt FP16 autocast completed but did not create ONNX: {output}")
+    return {
+        "precision": precision,
+        "input_path": str(onnx.resolve()),
+        "output_path": str(output.resolve()),
+        "command": command,
+        "stdout": completed.stdout,
+        "stderr": completed.stderr,
+    }
 
 
 def _require_trtexec() -> str:
@@ -37,10 +96,6 @@ def _build_command(
         f"--saveEngine={engine_path}",
         f"--memPoolSize=workspace:{int(workspace_mb)}",
     ]
-    if precision == "fp16":
-        command.append("--fp16")
-    elif precision == "int8":
-        command.extend(["--int8", f"--calib={calibration_cache}"])
     return command
 
 
@@ -55,16 +110,14 @@ def build_tensorrt_engine(
 
     if precision not in {"fp32", "fp16", "int8"}:
         raise ValueError("precision must be one of: fp32, fp16, int8")
-    if precision == "int8" and calibration_cache is None:
-        raise ValueError("INT8 TensorRT builds require a calibration cache file")
+    if precision == "int8":
+        raise ValueError("INT8 TensorRT 11.1 support is deferred until ModelOpt calibration is configured")
     if workspace_mb <= 0:
         raise ValueError("workspace_mb must be positive")
 
     onnx = Path(onnx_path)
     engine = Path(engine_path)
     calibration = Path(calibration_cache).resolve() if calibration_cache is not None else None
-    if precision == "int8" and (calibration is None or not calibration.is_file()):
-        raise ValueError("INT8 TensorRT builds require an existing regular calibration cache file")
     command = _build_command(shutil.which("trtexec") or "trtexec", onnx, engine, precision, calibration, workspace_mb)
     try:
         completed = subprocess.run(command, capture_output=True, text=True, check=True)

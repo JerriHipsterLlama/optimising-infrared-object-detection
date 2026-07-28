@@ -8,6 +8,7 @@ from infrared_detection.benchmarking.rtx import (
     RtxToolsUnavailable,
     benchmark_tensorrt_engine,
     build_tensorrt_engine,
+    prepare_tensorrt_precision_onnx,
 )
 
 
@@ -15,7 +16,7 @@ def _completed_trtexec(stdout: str = ""):
     return subprocess.CompletedProcess(["trtexec"], 0, stdout=stdout, stderr="")
 
 
-def test_tensorrt_command_uses_fp16_flag(monkeypatch, tmp_path):
+def test_tensorrt_command_does_not_use_removed_fp16_flag(monkeypatch, tmp_path):
     commands = []
     monkeypatch.setattr(subprocess, "run", lambda command, **kwargs: commands.append(command) or _completed_trtexec())
     engine_path = tmp_path / "model.engine"
@@ -23,50 +24,63 @@ def test_tensorrt_command_uses_fp16_flag(monkeypatch, tmp_path):
 
     build_tensorrt_engine(tmp_path / "model.onnx", engine_path, "fp16", None, 1024)
 
-    assert "--fp16" in commands[0]
+    assert "--fp16" not in commands[0]
 
 
-def test_int8_build_requires_calibration_cache(tmp_path):
-    with pytest.raises(ValueError, match="calibration"):
-        build_tensorrt_engine(tmp_path / "model.onnx", tmp_path / "model.engine", "int8", None, 1024)
-
-
-@pytest.mark.parametrize("cache_name", ["calibration", "missing.cache"])
-def test_int8_build_requires_existing_regular_calibration_cache(tmp_path, cache_name):
-    calibration_directory = tmp_path / "calibration"
-    calibration_directory.mkdir()
-    calibration_cache = calibration_directory if cache_name == "calibration" else tmp_path / cache_name
-
-    with pytest.raises(ValueError, match="regular calibration cache file"):
-        build_tensorrt_engine(
-            tmp_path / "model.onnx",
-            tmp_path / "model.engine",
-            "int8",
-            calibration_cache,
-            1024,
-        )
-
-
-def test_tensorrt_build_records_command_calibration_cache_and_engine_size(monkeypatch, tmp_path):
+def test_fp16_preparation_uses_modelopt_autocast(monkeypatch, tmp_path):
     commands = []
-    calibration_cache = tmp_path / "calibration.cache"
-    calibration_cache.write_bytes(b"calibration-cache")
-    engine_path = tmp_path / "model.engine"
+    onnx_path = tmp_path / "model.onnx"
+    output_path = tmp_path / "model.fp16.onnx"
+    onnx_path.write_bytes(b"onnx")
 
     def run(command, **kwargs):
         commands.append(command)
-        engine_path.write_bytes(b"built-engine")
-        return _completed_trtexec("engine built")
+        output_path.write_bytes(b"autocast-onnx")
+        return _completed_trtexec("autocast complete")
 
     monkeypatch.setattr(subprocess, "run", run)
-    result = build_tensorrt_engine(tmp_path / "model.onnx", engine_path, "int8", calibration_cache, 2048)
 
-    assert "--int8" in commands[0]
-    assert f"--calib={calibration_cache.resolve()}" in commands[0]
-    assert result["command"] == commands[0]
-    assert result["calibration_cache"] == str(calibration_cache.resolve())
-    assert result["calibration_cache_provenance"] == str(calibration_cache.resolve())
-    assert result["engine_size_bytes"] == len(b"built-engine")
+    result = prepare_tensorrt_precision_onnx(onnx_path, output_path, "fp16")
+
+    assert commands[0][1:4] == ["-m", "modelopt.onnx.autocast", "--onnx_path"]
+    assert str(onnx_path) in commands[0]
+    assert result["output_path"] == str(output_path.resolve())
+
+
+def test_fp32_preparation_keeps_original_onnx(tmp_path):
+    onnx_path = tmp_path / "model.onnx"
+    onnx_path.write_bytes(b"onnx")
+
+    result = prepare_tensorrt_precision_onnx(onnx_path, tmp_path / "unused.onnx", "fp32")
+
+    assert result["output_path"] == str(onnx_path.resolve())
+
+
+def test_fp16_preparation_reports_modelopt_failure(monkeypatch, tmp_path):
+    onnx_path = tmp_path / "model.onnx"
+    output_path = tmp_path / "model.fp16.onnx"
+    onnx_path.write_bytes(b"onnx")
+
+    def run(command, **kwargs):
+        raise subprocess.CalledProcessError(1, command, stderr="modelopt unavailable")
+
+    monkeypatch.setattr(subprocess, "run", run)
+
+    with pytest.raises(RuntimeError, match="ModelOpt FP16 autocast failed"):
+        prepare_tensorrt_precision_onnx(onnx_path, output_path, "fp16")
+
+
+def test_int8_build_is_deferred_for_tensorrt_11(tmp_path):
+    with pytest.raises(ValueError, match="deferred"):
+        build_tensorrt_engine(tmp_path / "model.onnx", tmp_path / "model.engine", "int8", None, 1024)
+
+
+def test_int8_build_is_deferred_even_when_cache_is_supplied(tmp_path):
+    calibration_cache = tmp_path / "calibration.cache"
+    calibration_cache.write_bytes(b"calibration-cache")
+
+    with pytest.raises(ValueError, match="deferred"):
+        build_tensorrt_engine(tmp_path / "model.onnx", tmp_path / "model.engine", "int8", calibration_cache, 1024)
 
 
 def test_tensorrt_benchmark_records_latency_percentile_and_fps(monkeypatch, tmp_path):
