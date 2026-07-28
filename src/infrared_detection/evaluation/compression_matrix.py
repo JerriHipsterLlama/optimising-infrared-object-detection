@@ -396,13 +396,14 @@ class CompressionMatrixAdapters:
     def defaults(cls, config: Mapping[str, Any]) -> "CompressionMatrixAdapters":
         """Create real adapters lazily, so dry runs require no ML runtime."""
 
-        del config
         return cls(
             build_pruned_checkpoint=lambda cfg, output_dir, ratio: build_pruned_checkpoint(
                 cfg, output_dir, requested_ratio=ratio
             ),
             export_checkpoint=_export_checkpoint_to_onnx,
-            build_engine=_build_rtx_engine,
+            build_engine=lambda onnx, engine, precision, calibration_cache, workspace_mb: _build_rtx_engine(
+                onnx, engine, precision, calibration_cache, workspace_mb, config
+            ),
             evaluate_engine=_evaluate_engine_accuracy,
             parameter_count=_checkpoint_parameter_count,
             benchmark_engine=_benchmark_rtx_engine,
@@ -637,9 +638,13 @@ def run_compression_matrix(
             )
             if not engine.is_file():
                 raise FileNotFoundError(f"TensorRT engine was not written: {engine}")
-            metrics = dict(active.evaluate_engine(engine, config, _evaluation_device(config)))
+            evaluation_engine = Path(str(build.get("evaluation_engine_path", engine)))
+            if not evaluation_engine.is_file():
+                raise FileNotFoundError(f"TensorRT evaluation engine was not written: {evaluation_engine}")
+            metrics = dict(active.evaluate_engine(evaluation_engine, config, _evaluation_device(config)))
             benchmark = dict(active.benchmark_engine(engine, "rtx3070"))
             _record_paths(row, variant_checkpoint, onnx, engine)
+            row["evaluation_engine_path"] = str(evaluation_engine.resolve())
             row.update({key: value for key, value in metrics.items() if key != "precision"})
             if "precision" in metrics:
                 row["detection_precision"] = metrics["precision"]
@@ -678,11 +683,17 @@ def _export_checkpoint_to_onnx(checkpoint: Path, config: Mapping[str, Any], outp
 
 
 def _build_rtx_engine(
-    onnx: Path, engine: Path, precision: str, calibration_cache: Path | None, workspace_mb: int
+    onnx: Path,
+    engine: Path,
+    precision: str,
+    calibration_cache: Path | None,
+    workspace_mb: int,
+    config: Mapping[str, Any],
 ) -> Mapping[str, Any]:
     from infrared_detection.benchmarking.rtx import (
         build_tensorrt_engine,
         prepare_tensorrt_precision_onnx,
+        write_ultralytics_engine_metadata,
     )
 
     engine.parent.mkdir(parents=True, exist_ok=True)
@@ -690,6 +701,24 @@ def _build_rtx_engine(
     preparation = prepare_tensorrt_precision_onnx(onnx, prepared_onnx, precision)
     build = build_tensorrt_engine(prepared_onnx, engine, precision, calibration_cache, workspace_mb)
     build["precision_preparation"] = preparation
+    data = config.get("data")
+    if not isinstance(data, Mapping) or not isinstance(data.get("dataset_yaml"), str):
+        raise ValueError("Compression matrix requires data.dataset_yaml for engine metadata")
+    dataset_path = _resolve_repo_path(data["dataset_yaml"])
+    dataset = yaml.safe_load(dataset_path.read_text(encoding="utf-8")) or {}
+    names = dataset.get("names") if isinstance(dataset, Mapping) else None
+    if not isinstance(names, (list, dict)):
+        raise ValueError(f"Dataset YAML has no names list or mapping: {dataset_path}")
+    image_size = int(config.get("experiment", {}).get("image_size", 640))
+    metadata = {
+        "stride": 32,
+        "task": "detect",
+        "batch": 1,
+        "imgsz": [image_size, image_size],
+        "names": names,
+    }
+    evaluation_engine = engine.parent / "model.evaluation.engine"
+    build["evaluation_engine_path"] = write_ultralytics_engine_metadata(engine, evaluation_engine, metadata)
     return build
 
 

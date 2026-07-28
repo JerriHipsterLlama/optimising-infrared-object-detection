@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import subprocess
+import json
 
 import pytest
 
@@ -8,6 +9,7 @@ from infrared_detection.benchmarking.rtx import (
     RtxToolsUnavailable,
     benchmark_tensorrt_engine,
     build_tensorrt_engine,
+    write_ultralytics_engine_metadata,
     prepare_tensorrt_precision_onnx,
 )
 
@@ -81,6 +83,29 @@ def test_int8_build_is_deferred_even_when_cache_is_supplied(tmp_path):
 
     with pytest.raises(ValueError, match="deferred"):
         build_tensorrt_engine(tmp_path / "model.onnx", tmp_path / "model.engine", "int8", calibration_cache, 1024)
+
+
+def test_ultralytics_engine_metadata_wrapper_preserves_raw_engine(tmp_path):
+    raw_engine = tmp_path / "model.engine"
+    evaluation_engine = tmp_path / "model.evaluation.engine"
+    raw_engine.write_bytes(b"raw-tensorrt-engine")
+    metadata = {
+        "stride": 32,
+        "task": "detect",
+        "batch": 1,
+        "imgsz": [352, 352],
+        "names": ["bicycle", "dog", "person", "vehicle"],
+    }
+
+    result = write_ultralytics_engine_metadata(raw_engine, evaluation_engine, metadata)
+
+    assert result == str(evaluation_engine.resolve())
+    with evaluation_engine.open("rb") as handle:
+        metadata_size = int.from_bytes(handle.read(4), byteorder="little")
+        encoded = handle.read(metadata_size)
+        payload = handle.read()
+    assert json.loads(encoded.decode("utf-8")) == metadata
+    assert payload == raw_engine.read_bytes()
 
 
 def test_tensorrt_benchmark_records_latency_percentile_and_fps(monkeypatch, tmp_path):

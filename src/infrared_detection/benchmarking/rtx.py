@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+import json
 import shutil
 import subprocess
 import sys
@@ -12,6 +13,28 @@ from typing import Any
 
 class RtxToolsUnavailable(RuntimeError):
     """Raised when a local RTX benchmark cannot find TensorRT's trtexec tool."""
+
+
+def write_ultralytics_engine_metadata(
+    raw_engine_path: Path, evaluation_engine_path: Path, metadata: dict[str, Any]
+) -> str:
+    """Create an Ultralytics-compatible evaluation copy around a raw TRT engine."""
+
+    raw_engine = Path(raw_engine_path)
+    evaluation_engine = Path(evaluation_engine_path)
+    if not raw_engine.is_file():
+        raise FileNotFoundError(raw_engine)
+    required = {"stride", "task", "batch", "imgsz", "names"}
+    missing = required.difference(metadata)
+    if missing:
+        raise ValueError(f"Ultralytics engine metadata is missing: {sorted(missing)}")
+    encoded = json.dumps(metadata, separators=(",", ":")).encode("utf-8")
+    evaluation_engine.parent.mkdir(parents=True, exist_ok=True)
+    with evaluation_engine.open("wb") as handle:
+        handle.write(len(encoded).to_bytes(4, byteorder="little"))
+        handle.write(encoded)
+        handle.write(raw_engine.read_bytes())
+    return str(evaluation_engine.resolve())
 
 
 def prepare_tensorrt_precision_onnx(
