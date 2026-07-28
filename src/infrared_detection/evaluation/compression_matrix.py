@@ -614,13 +614,17 @@ def run_compression_matrix(
     rows = _load_completed_rows(output_dir, rows)
     cached_checkpoints: dict[float, Path] = {}
     ratio_failures: dict[float, Exception] = {}
-    for row in rows:
+    total_rows = len(rows)
+    for row_index, row in enumerate(rows, start=1):
         if row.get("status") == "completed":
             if row.get("compression") == "structured_pruning":
                 saved = Path(str(row["checkpoint_path"]))
                 if saved.is_file():
                     cached_checkpoints.setdefault(float(row["prune_ratio"]), saved)
             continue
+        variant_id = str(row["variant_id"])
+        precision = str(row["precision"]).upper()
+        print(f"[compression-matrix] {row_index}/{total_rows} {variant_id}: preparing checkpoint", flush=True)
         try:
             if row["compression"] == "dense":
                 variant_checkpoint = checkpoint
@@ -629,10 +633,16 @@ def run_compression_matrix(
                     row, config, output_dir, active, cached_checkpoints, ratio_failures
                 )
             variant_dir = output_dir / "variants" / str(row["variant_id"])
+            print(f"[compression-matrix] {row_index}/{total_rows} {variant_id}: exporting ONNX", flush=True)
             onnx = Path(active.export_checkpoint(variant_checkpoint, config, variant_dir))
             if not onnx.is_file():
                 raise FileNotFoundError(f"ONNX export was not written: {onnx}")
             engine = variant_dir / "model.engine"
+            print(
+                f"[compression-matrix] {row_index}/{total_rows} {variant_id}: "
+                f"building {precision} TensorRT engine (this may be quiet for a while)",
+                flush=True,
+            )
             build = dict(
                 active.build_engine(onnx, engine, str(row["precision"]), _calibration_cache(config), _workspace_mb(config))
             )
@@ -641,7 +651,9 @@ def run_compression_matrix(
             evaluation_engine = Path(str(build.get("evaluation_engine_path", engine)))
             if not evaluation_engine.is_file():
                 raise FileNotFoundError(f"TensorRT evaluation engine was not written: {evaluation_engine}")
+            print(f"[compression-matrix] {row_index}/{total_rows} {variant_id}: evaluating detection accuracy", flush=True)
             metrics = dict(active.evaluate_engine(evaluation_engine, config, _evaluation_device(config)))
+            print(f"[compression-matrix] {row_index}/{total_rows} {variant_id}: benchmarking RTX 3070 latency", flush=True)
             benchmark = dict(active.benchmark_engine(engine, "rtx3070"))
             _record_paths(row, variant_checkpoint, onnx, engine)
             row["evaluation_engine_path"] = str(evaluation_engine.resolve())
@@ -660,8 +672,10 @@ def run_compression_matrix(
             }
             row["status"] = "completed"
             row["error"] = None
+            print(f"[compression-matrix] {row_index}/{total_rows} {variant_id}: completed", flush=True)
         except Exception as exc:
             _failure(row, exc)
+            print(f"[compression-matrix] {row_index}/{total_rows} {variant_id}: failed - {exc}", flush=True)
         finally:
             _write_matrix_artifacts(output_dir, config_file, config, rows)
     return rows

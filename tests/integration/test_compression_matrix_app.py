@@ -108,7 +108,7 @@ def _fake_adapters(*, int8_fails: bool) -> CompressionMatrixAdapters:
     )
 
 
-def test_runner_keeps_successful_rows_when_int8_fails(tmp_path):
+def test_runner_keeps_successful_rows_when_int8_fails(tmp_path, capsys):
     rows = run_compression_matrix(write_matrix_config(tmp_path), adapters=_fake_adapters(int8_fails=True))
 
     assert any(row["status"] == "completed" and row["precision"] == "fp16" for row in rows), [
@@ -117,3 +117,7 @@ def test_runner_keeps_successful_rows_when_int8_fails(tmp_path):
     assert any(row["status"] == "failed" and row["precision"] == "int8" for row in rows)
     manifest = json.loads((tmp_path / "results" / "manifest.json").read_text(encoding="utf-8"))
     assert manifest["selected_candidate_id"] == "cluster-8-ratio-0.05-fp32"
+    output = capsys.readouterr().out
+    assert "dense-fp32: exporting ONNX" in output
+    assert "dense-fp32: building FP32 TensorRT engine" in output
+    assert "cluster-8-ratio-0.05-int8: failed - INT8 calibration failed" in output

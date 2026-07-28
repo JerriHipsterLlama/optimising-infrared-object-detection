@@ -16,9 +16,13 @@ pruning:
     - model.4.cv2.conv
     - model.6.cv2.conv
     - model.8.cv2.conv
+    - model.12.cv2.conv
+    - model.15.cv2.conv
+    - model.18.cv2.conv
+    - model.21.cv2.conv
   cluster_size: 8
   evidence_filters_removed: 8
-  prune_ratios: [0.05, 0.10, 0.15, 0.20, 0.25, 0.30]
+  prune_ratios: [0.10, 0.20, 0.30, 0.40, 0.50]
   allowed_map50_95_drop: 0.02
   importance: minimum_weight
 

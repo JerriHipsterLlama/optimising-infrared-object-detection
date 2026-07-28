@@ -117,10 +117,14 @@ def test_rtx_config_declares_filterwise_evidence_without_inference():
         "model.4.cv2.conv",
         "model.6.cv2.conv",
         "model.8.cv2.conv",
+        "model.12.cv2.conv",
+        "model.15.cv2.conv",
+        "model.18.cv2.conv",
+        "model.21.cv2.conv",
     ]
     assert pruning["cluster_size"] == 8
     assert pruning["evidence_filters_removed"] == 8
-    assert pruning["prune_ratios"] == [0.05, 0.10, 0.15, 0.20, 0.25, 0.30]
+    assert pruning["prune_ratios"] == [0.10, 0.20, 0.30, 0.40, 0.50]
     assert pruning["allowed_map50_95_drop"] == 0.02
     assert pruning["importance"] == "minimum_weight"
     assert config["precisions"] == ["fp32", "fp16"]
@@ -132,7 +136,7 @@ def test_rtx_config_declares_filterwise_evidence_without_inference():
         "candidate_layers": pruning["candidate_layers"],
         "cluster_size": pruning["cluster_size"],
         "evidence_filters_removed": pruning["evidence_filters_removed"],
-        "prune_ratio": 0.05,
+        "prune_ratio": 0.10,
         "allowed_map50_95_drop": pruning["allowed_map50_95_drop"],
         "importance": pruning["importance"],
     }
