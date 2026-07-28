@@ -22,6 +22,14 @@ def write_metrics(path: str | Path, metrics: Mapping[str, Any]) -> None:
     _write_json(path, metrics)
 
 
+def _csv_value(value: Any) -> Any:
+    if isinstance(value, (Mapping, list, tuple)):
+        return json.dumps(value, sort_keys=True, separators=(",", ":"), default=str)
+    if isinstance(value, str):
+        return value.replace("\r\n", "\\n").replace("\n", "\\n").replace("\r", "\\n")
+    return value
+
+
 def write_metrics_csv(path: str | Path, rows: list[Mapping[str, Any]]) -> None:
     output_path = Path(path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -29,5 +37,4 @@ def write_metrics_csv(path: str | Path, rows: list[Mapping[str, Any]]) -> None:
     with output_path.open("w", newline="", encoding="utf-8") as handle:
         writer = csv.DictWriter(handle, fieldnames=keys)
         writer.writeheader()
-        writer.writerows(rows)
-
+        writer.writerows({key: _csv_value(row.get(key)) for key in keys} for row in rows)
