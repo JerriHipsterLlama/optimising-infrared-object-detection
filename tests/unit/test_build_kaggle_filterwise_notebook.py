@@ -57,3 +57,17 @@ def test_notebook_embeds_complete_filterwise_sweep_contract(tmp_path):
     assert "DependencyGraph" in source
     assert "filters_after > 1" in source
     assert "filters_removed" in source
+
+
+def test_notebook_embeds_resume_and_layer_summary_contract(tmp_path):
+    output = tmp_path / "notebook.ipynb"
+
+    build_notebook(output)
+
+    source = "\n".join(line for cell in json.loads(output.read_text(encoding="utf-8"))["cells"] for line in cell.get("source", []))
+
+    assert "def load_resume_state(config):" in source
+    assert "def plot_layer_sensitivity(rows, output_dir):" in source
+    assert "def build_layer_summary(rows, config):" in source
+    assert "layer_summary.csv" in source
+    assert "max_recall_drop" in source

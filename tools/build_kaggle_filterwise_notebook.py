@@ -150,7 +150,11 @@ def build_notebook(output_path: Path) -> None:
                         writer = csv.DictWriter(handle, fieldnames=fields)
                         writer.writeheader()
                         writer.writerows(rows)
-                    manifest = {key: value for key, value in state.items() if key != "rows"}
+                    manifest = {
+                        key: (sorted(value) if key in {"completed", "failed"} else value)
+                        for key, value in state.items()
+                        if key != "rows"
+                    }
                     manifest["rows"] = rows
                     (output_dir / "manifest.json").write_text(json.dumps(manifest, indent=2, default=_json_safe) + "\\n", encoding="utf-8")
                     progress = {"completed": sorted(state["completed"]), "failed": sorted(state["failed"]), "updated_at": datetime.now(timezone.utc).isoformat()}
@@ -268,6 +272,8 @@ def build_notebook(output_path: Path) -> None:
                         filters_before_step = module.out_channels
                         filters_removed = filters_before - filters_before_step + 1
                         candidate_key = f"{layer_name}:{filters_removed}"
+                        if candidate_key in state["failed"] and not config["retry_failed"]:
+                            break
                         if candidate_key in state["completed"]:
                             model = prune_output_channel_with_dependencies(model, layer_name, minimum_l1_filter(module), config)
                             wrapper.model = model
@@ -308,9 +314,137 @@ def build_notebook(output_path: Path) -> None:
                 '''
             ),
             markdown_cell("## Run or resume"),
-            code_cell("# Persist results.csv, manifest.json, and progress.json after every result."),
+            code_cell(
+                '''
+                def experiment_identity(config):
+                    validated = validate_inputs(config)
+                    return {
+                        "checkpoint": file_identity(validated["checkpoint_path"]),
+                        "dataset_yaml": file_identity(validated["dataset_yaml"]),
+                        "imgsz": config["imgsz"],
+                        "split": config["split"],
+                        "criterion": "minimum_l1_output_filter",
+                    }
+
+
+                def load_resume_state(config):
+                    identity = experiment_identity(config)
+                    state = {
+                        "config": config,
+                        "identity": identity,
+                        "rows": [],
+                        "completed": set(),
+                        "failed": set(),
+                    }
+                    if not config["resume_dir"]:
+                        return state
+                    manifest_path = Path(config["resume_dir"]) / "manifest.json"
+                    if not manifest_path.is_file():
+                        raise FileNotFoundError(f"Resume manifest is missing: {manifest_path}")
+                    previous = json.loads(manifest_path.read_text(encoding="utf-8"))
+                    previous_identity = dict(previous.get("identity", {}))
+                    previous_layers = previous_identity.pop("candidate_layers", None)
+                    if previous_identity != identity:
+                        raise ValueError("Resume artifacts do not match checkpoint, dataset YAML, image size, split, or pruning criterion.")
+                    state["rows"] = list(previous.get("rows", []))
+                    state["previous_candidate_layers"] = previous_layers
+                    for row in state["rows"]:
+                        if row.get("stage") != "filterwise":
+                            continue
+                        key = f"{row.get('layer')}:{row.get('filters_removed')}"
+                        if row.get("status") == "completed":
+                            state["completed"].add(key)
+                        elif row.get("status") == "failed" and not config["retry_failed"]:
+                            state["failed"].add(key)
+                    return state
+
+
+                def run_or_resume(config):
+                    state = load_resume_state(config)
+                    if not any(row.get("stage") == "baseline" and row.get("status") == "completed" for row in state["rows"]):
+                        baseline = evaluate_dense_baseline(config)
+                        state["rows"].append(baseline)
+                        write_artifacts(state)
+                    wrapper, _ = load_dense_wrapper(config)
+                    layers = discover_prunable_layers(wrapper.model)
+                    previous_layers = state.pop("previous_candidate_layers", None)
+                    if previous_layers is not None and previous_layers != layers:
+                        raise ValueError("Resume artifacts were created with a different candidate-layer list.")
+                    state["identity"]["candidate_layers"] = layers
+                    write_artifacts(state)
+                    for layer_name in layers:
+                        try:
+                            run_layer_sweep(layer_name, config, state)
+                        except Exception as exc:
+                            state["rows"].append({"stage": "layer", "status": "failed", "layer": layer_name, "error": f"{type(exc).__name__}: {exc}"})
+                            write_artifacts(state)
+                    return state
+
+
+                state = run_or_resume(CONFIG)
+                '''
+            ),
             markdown_cell("## Analysis"),
-            code_cell("# Write plots and layer-summary artifacts."),
+            code_cell(
+                '''
+                def plot_layer_sensitivity(rows, output_dir):
+                    output_dir = Path(output_dir)
+                    plot_dir = output_dir / "plots"
+                    plot_dir.mkdir(parents=True, exist_ok=True)
+                    baseline = next(row for row in rows if row.get("stage") == "baseline" and row.get("status") == "completed")
+                    baseline_map = float(baseline["map50_95"])
+                    baseline_recall = float(baseline["recall"])
+                    frame = pd.DataFrame(rows)
+                    for layer_name, group in frame[(frame.get("stage") == "filterwise") & (frame.get("status") == "completed")].groupby("layer"):
+                        group = group.sort_values("filters_removed")
+                        figure, axes = plt.subplots(1, 2, figsize=(11, 4), constrained_layout=True)
+                        axes[0].plot(group["filters_removed"], group["map50_95"], marker="o", markersize=3)
+                        axes[0].axhline(baseline_map, color="black", linestyle="--", label="dense baseline")
+                        axes[0].axhline(baseline_map - CONFIG["max_map50_95_drop"], color="tab:red", linestyle=":", label="mAP limit")
+                        axes[0].set(xlabel="Filters removed", ylabel="mAP50-95", title=f"{layer_name}: accuracy")
+                        axes[1].plot(group["filters_removed"], group["recall"], marker="o", markersize=3)
+                        axes[1].axhline(baseline_recall, color="black", linestyle="--", label="dense baseline")
+                        axes[1].axhline(baseline_recall - CONFIG["max_recall_drop"], color="tab:red", linestyle=":", label="recall limit")
+                        axes[1].set(xlabel="Filters removed", ylabel="Recall", title=f"{layer_name}: recall")
+                        for axis in axes:
+                            axis.grid(alpha=0.25)
+                            axis.legend()
+                        figure.savefig(plot_dir / f"{layer_name.replace('.', '_')}_sensitivity.png", dpi=180)
+                        plt.close(figure)
+
+
+                def build_layer_summary(rows, config):
+                    baseline = next(row for row in rows if row.get("stage") == "baseline" and row.get("status") == "completed")
+                    baseline_map = float(baseline["map50_95"])
+                    baseline_recall = float(baseline["recall"])
+                    frame = pd.DataFrame(rows)
+                    results = []
+                    completed = frame[(frame.get("stage") == "filterwise") & (frame.get("status") == "completed")]
+                    for layer_name, group in completed.groupby("layer"):
+                        group = group.copy()
+                        group["map_drop"] = baseline_map - group["map50_95"].astype(float)
+                        group["recall_drop"] = baseline_recall - group["recall"].astype(float)
+                        map_safe = group[group["map_drop"] <= config["max_map50_95_drop"]]
+                        recall_safe = group[group["recall_drop"] <= config["max_recall_drop"]]
+                        map_limit = int(map_safe["filters_removed"].max()) if not map_safe.empty else 0
+                        recall_limit = int(recall_safe["filters_removed"].max()) if not recall_safe.empty else 0
+                        results.append({
+                            "layer": layer_name,
+                            "filters_before": int(group["filters_before"].iloc[0]),
+                            "max_filters_removed_within_map_limit": map_limit,
+                            "max_filters_removed_within_recall_limit": recall_limit,
+                            "recommended_max_filters_removed": min(map_limit, recall_limit),
+                            "status": "recommended" if min(map_limit, recall_limit) > 0 else "exclude",
+                        })
+                    return pd.DataFrame(results).sort_values(["status", "recommended_max_filters_removed"], ascending=[True, False])
+
+
+                plot_layer_sensitivity(state["rows"], CONFIG["output_dir"])
+                layer_summary = build_layer_summary(state["rows"], CONFIG)
+                layer_summary.to_csv(Path(CONFIG["output_dir"]) / "layer_summary.csv", index=False)
+                layer_summary
+                '''
+            ),
         ],
     }
     output_path.parent.mkdir(parents=True, exist_ok=True)
