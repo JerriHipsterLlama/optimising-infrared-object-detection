@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 from tools.build_kaggle_filterwise_notebook import build_notebook
 
@@ -71,3 +72,10 @@ def test_notebook_embeds_resume_and_layer_summary_contract(tmp_path):
     assert "def build_layer_summary(rows, config):" in source
     assert "layer_summary.csv" in source
     assert "max_recall_drop" in source
+
+
+def test_readme_links_to_kaggle_filterwise_notebook():
+    text = Path("README.md").read_text(encoding="utf-8")
+
+    assert "kaggle_filterwise_sensitivity.ipynb" in text
+    assert "Duplicate NPY" in text

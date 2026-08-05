@@ -128,7 +128,7 @@ Merge native results for every final global candidate before reading `selected_c
 
 ### RTX compression-matrix screening
 
-The local RTX workflow builds and evaluates dense and structured-pruned TensorRT variants. The pruning variants always start from the dense checkpoint; the filterwise manifest is used as evidence for the chosen cluster size, not as the pruning input. The current matrix tests FP32 and FP16 at input size 352, the recommended candidate layers, cluster size 8, and ratios 0.05 through 0.30. INT8 is deferred while the TensorRT 11.1 ModelOpt workflow is developed.
+The local RTX workflow builds and evaluates dense and structured-pruned TensorRT variants. The pruning variants always start from the dense checkpoint; filterwise results are analysed manually to choose the cluster size and candidate layers before the matrix is run. The current matrix tests FP32 and FP16 at input size 352, the recommended candidate layers, cluster size 8, and the configured pruning ratios. INT8 is deferred while the TensorRT 11.1 ModelOpt workflow is developed.
 
 Run a planning check first:
 
@@ -149,6 +149,15 @@ The run writes `manifest.json` and `results.csv` under `runs/experiments/rtx_com
 The compression-matrix `runtime.evaluation_device` is intentionally `cpu` for TensorRT engine validation on Windows. Ultralytics' TensorRT backend uses this selector to initialize the `.engine` on CUDA while avoiding intermittent PyTorch numeric-device visibility failures; latency is still measured with the raw TensorRT engine through `trtexec`.
 
 TensorRT 11.1 no longer accepts the legacy `trtexec --fp16`, `--int8`, and `--calib` flags. FP16 is prepared through the ModelOpt autocast boundary before engine building. INT8 is intentionally excluded from the current configuration and will require a separate ModelOpt calibration-data workflow.
+
+### Kaggle filterwise sensitivity sweep
+
+Use [notebooks/kaggle_filterwise_sensitivity.ipynb](notebooks/kaggle_filterwise_sensitivity.ipynb) to measure one-filter-at-a-time pruning sensitivity for every supported YOLO convolution layer on a Kaggle GPU.
+
+- Upload validation JPG/PNG images, YOLO labels, `dataset.yaml`, and `best.pt` as one private Kaggle Dataset.
+- Do not upload Duplicate NPY image files; they duplicate the image package and are not used by the notebook.
+- Open the notebook, update `CONFIG["input_root"]` to the attached Kaggle Dataset path, and enable a Kaggle GPU.
+- Download or version the `filterwise_sensitivity` working-directory output after each session to resume safely.
 
 ## Repository layout
 
