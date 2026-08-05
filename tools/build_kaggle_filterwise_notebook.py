@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import textwrap
 from pathlib import Path
 from typing import Any
 
@@ -18,7 +19,7 @@ def code_cell(source: str) -> dict[str, Any]:
         "execution_count": None,
         "metadata": {},
         "outputs": [],
-        "source": [source],
+        "source": [textwrap.dedent(source).strip() + "\n"],
     }
 
 
@@ -37,9 +38,145 @@ def build_notebook(output_path: Path) -> None:
             markdown_cell("## Setup"),
             code_cell("!pip install -q ultralytics==8.4.7 torch-pruning pandas matplotlib pyyaml"),
             markdown_cell("## Configuration"),
-            code_cell("# Configuration is embedded in this notebook."),
+            code_cell(
+                '''
+                from __future__ import annotations
+
+                import csv
+                import hashlib
+                import json
+                import platform
+                import random
+                from datetime import datetime, timezone
+                from pathlib import Path
+
+                import matplotlib.pyplot as plt
+                import numpy as np
+                import pandas as pd
+                import torch
+                import yaml
+                from ultralytics import YOLO
+
+                CONFIG = {
+                    "input_root": "/kaggle/input/camel-filterwise-input",
+                    "checkpoint_relpath": "best.pt",
+                    "dataset_yaml_relpath": "dataset.yaml",
+                    "output_dir": "/kaggle/working/filterwise_sensitivity",
+                    "imgsz": 352,
+                    "split": "val",
+                    "device": 0,
+                    "conf": 0.25,
+                    "iou": 0.6,
+                    "seed": 7,
+                    "max_map50_95_drop": 0.02,
+                    "max_recall_drop": 0.02,
+                    "full_curve": True,
+                    "retry_failed": False,
+                    "resume_dir": None,
+                    "protected_prefixes": ["model.22"],
+                    "milestone_removals": [1, 8, 16, 32],
+                }
+
+                def set_seed(seed):
+                    random.seed(seed)
+                    np.random.seed(seed)
+                    torch.manual_seed(seed)
+                    torch.cuda.manual_seed_all(seed)
+
+                set_seed(CONFIG["seed"])
+                '''
+            ),
             markdown_cell("## Input validation"),
-            code_cell("# Validate checkpoint, dataset YAML, images, labels, and Kaggle GPU."),
+            code_cell(
+                '''
+                def file_identity(path):
+                    path = Path(path).resolve()
+                    digest = hashlib.sha256()
+                    with path.open("rb") as handle:
+                        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                            digest.update(chunk)
+                    return {"path": str(path), "sha256": digest.hexdigest(), "bytes": path.stat().st_size}
+
+
+                def validate_inputs(config):
+                    root = Path(config["input_root"]).resolve()
+                    if any(".npy" in str(value).lower() for value in config.values() if isinstance(value, str)):
+                        raise ValueError("Duplicate .npy image files are not supported by this notebook input package.")
+                    checkpoint_path = root / config["checkpoint_relpath"]
+                    dataset_yaml = root / config["dataset_yaml_relpath"]
+                    if not checkpoint_path.is_file():
+                        raise FileNotFoundError(f"Missing checkpoint: {checkpoint_path}")
+                    if not dataset_yaml.is_file():
+                        raise FileNotFoundError(f"Missing dataset YAML: {dataset_yaml}")
+                    dataset = yaml.safe_load(dataset_yaml.read_text(encoding="utf-8")) or {}
+                    val_path = dataset.get("val")
+                    if not isinstance(val_path, str) or not val_path:
+                        raise ValueError("dataset.yaml must define a non-empty 'val' path for Ultralytics validation.")
+                    image_dir = Path(val_path)
+                    if not image_dir.is_absolute():
+                        image_dir = (dataset_yaml.parent / image_dir).resolve()
+                    label_dir = image_dir.parent.parent / "labels" / image_dir.name
+                    if not image_dir.is_dir() or not any(image_dir.glob("*.*")):
+                        raise FileNotFoundError(f"Validation images are missing: {image_dir}")
+                    if not label_dir.is_dir():
+                        raise FileNotFoundError(f"Validation labels are missing: {label_dir}")
+                    if not torch.cuda.is_available():
+                        raise RuntimeError("A Kaggle GPU is required. Enable GPU acceleration in Notebook settings.")
+                    return {
+                        "root": root,
+                        "checkpoint_path": checkpoint_path.resolve(),
+                        "dataset_yaml": dataset_yaml.resolve(),
+                        "image_dir": image_dir,
+                        "label_dir": label_dir,
+                        "gpu_name": torch.cuda.get_device_name(config["device"]),
+                        "torch_version": torch.__version__,
+                    }
+
+
+                def _json_safe(value):
+                    if isinstance(value, Path):
+                        return str(value)
+                    if isinstance(value, (np.integer, np.floating)):
+                        return value.item()
+                    raise TypeError(f"Cannot serialize {type(value).__name__}")
+
+
+                def write_artifacts(state):
+                    output_dir = Path(state["config"]["output_dir"])
+                    output_dir.mkdir(parents=True, exist_ok=True)
+                    rows = state["rows"]
+                    fields = sorted({field for row in rows for field in row})
+                    with (output_dir / "results.csv").open("w", newline="", encoding="utf-8") as handle:
+                        writer = csv.DictWriter(handle, fieldnames=fields)
+                        writer.writeheader()
+                        writer.writerows(rows)
+                    manifest = {key: value for key, value in state.items() if key != "rows"}
+                    manifest["rows"] = rows
+                    (output_dir / "manifest.json").write_text(json.dumps(manifest, indent=2, default=_json_safe) + "\\n", encoding="utf-8")
+                    progress = {"completed": sorted(state["completed"]), "failed": sorted(state["failed"]), "updated_at": datetime.now(timezone.utc).isoformat()}
+                    (output_dir / "progress.json").write_text(json.dumps(progress, indent=2) + "\\n", encoding="utf-8")
+
+
+                def evaluate_dense_baseline(config):
+                    validated = validate_inputs(config)
+                    wrapper = YOLO(str(validated["checkpoint_path"]))
+                    metrics = wrapper.val(
+                        data=str(validated["dataset_yaml"]), split=config["split"], imgsz=config["imgsz"],
+                        device=config["device"], conf=config["conf"], iou=config["iou"], verbose=False,
+                    )
+                    return {
+                        "candidate_id": "baseline",
+                        "stage": "baseline",
+                        "status": "completed",
+                        "checkpoint_path": str(validated["checkpoint_path"]),
+                        "map50": float(metrics.box.map50),
+                        "map50_95": float(metrics.box.map),
+                        "precision": float(metrics.box.mp),
+                        "recall": float(metrics.box.mr),
+                        "parameter_count": int(sum(parameter.numel() for parameter in wrapper.model.parameters())),
+                    }
+                '''
+            ),
             markdown_cell("## Pruning engine"),
             code_cell("# Perform dependency-aware minimum-L1 filter pruning."),
             markdown_cell("## Run or resume"),

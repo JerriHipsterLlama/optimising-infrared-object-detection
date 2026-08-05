@@ -28,3 +28,17 @@ def test_build_notebook_creates_self_contained_kaggle_notebook(tmp_path):
     assert "results.csv" in source
     assert "progress.json" in source
     assert all(heading in source for heading in headings)
+
+
+def test_notebook_embeds_validation_and_durable_artifact_writers(tmp_path):
+    output = tmp_path / "notebook.ipynb"
+
+    build_notebook(output)
+
+    source = "\n".join(line for cell in json.loads(output.read_text(encoding="utf-8"))["cells"] for line in cell.get("source", []))
+
+    assert "def validate_inputs(config):" in source
+    assert "def write_artifacts(state):" in source
+    assert "def evaluate_dense_baseline(config):" in source
+    assert "checkpoint_path" in source
+    assert ".npy" in source
