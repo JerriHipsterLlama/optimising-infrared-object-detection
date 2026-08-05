@@ -42,3 +42,18 @@ def test_notebook_embeds_validation_and_durable_artifact_writers(tmp_path):
     assert "def evaluate_dense_baseline(config):" in source
     assert "checkpoint_path" in source
     assert ".npy" in source
+
+
+def test_notebook_embeds_complete_filterwise_sweep_contract(tmp_path):
+    output = tmp_path / "notebook.ipynb"
+
+    build_notebook(output)
+
+    source = "\n".join(line for cell in json.loads(output.read_text(encoding="utf-8"))["cells"] for line in cell.get("source", []))
+
+    assert "def discover_prunable_layers(model):" in source
+    assert "def minimum_l1_filter(module):" in source
+    assert "def run_layer_sweep(layer_name, config, state):" in source
+    assert "DependencyGraph" in source
+    assert "filters_after > 1" in source
+    assert "filters_removed" in source

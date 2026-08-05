@@ -178,7 +178,135 @@ def build_notebook(output_path: Path) -> None:
                 '''
             ),
             markdown_cell("## Pruning engine"),
-            code_cell("# Perform dependency-aware minimum-L1 filter pruning."),
+            code_cell(
+                '''
+                import torch_pruning as tp
+
+
+                def get_module(model, layer_name):
+                    module = dict(model.named_modules()).get(layer_name)
+                    if not isinstance(module, torch.nn.Conv2d):
+                        raise ValueError(f"{layer_name!r} is not a Conv2d module")
+                    return module
+
+
+                def example_input_for(model, imgsz, device):
+                    first_conv = next(module for module in model.modules() if isinstance(module, torch.nn.Conv2d))
+                    cuda_device = f"cuda:{device}" if isinstance(device, int) else device
+                    return torch.zeros((1, first_conv.in_channels, imgsz, imgsz), device=cuda_device)
+
+
+                def dependency_graph(model, config):
+                    return tp.DependencyGraph().build_dependency(
+                        model,
+                        example_inputs=example_input_for(model, config["imgsz"], config["device"]),
+                    )
+
+
+                def discover_prunable_layers(model):
+                    excluded = tuple(CONFIG["protected_prefixes"])
+                    candidates = []
+                    for name, module in model.named_modules():
+                        if not isinstance(module, torch.nn.Conv2d) or module.out_channels <= 1:
+                            continue
+                        if name.startswith(excluded):
+                            continue
+                        try:
+                            graph = dependency_graph(model, CONFIG)
+                            group = graph.get_pruning_group(module, tp.prune_conv_out_channels, idxs=[0])
+                            if group.check_pruning_group():
+                                candidates.append(name)
+                        except Exception as exc:
+                            print(f"Skipping unsupported layer {name}: {exc}")
+                    return candidates
+
+
+                def minimum_l1_filter(module):
+                    scores = module.weight.detach().abs().sum(dim=(1, 2, 3))
+                    return int(scores.argmin().item())
+
+
+                def prune_output_channel_with_dependencies(model, layer_name, index, config):
+                    module = get_module(model, layer_name)
+                    graph = dependency_graph(model, config)
+                    group = graph.get_pruning_group(module, tp.prune_conv_out_channels, idxs=[index])
+                    if not group.check_pruning_group():
+                        raise RuntimeError(f"Dependency pruning is unsafe for {layer_name} filter {index}")
+                    group.prune()
+                    return model
+
+
+                def load_dense_wrapper(config):
+                    validated = validate_inputs(config)
+                    wrapper = YOLO(str(validated["checkpoint_path"]))
+                    cuda_device = f"cuda:{config['device']}" if isinstance(config["device"], int) else config["device"]
+                    wrapper.model.to(cuda_device).eval()
+                    return wrapper, validated
+
+
+                def evaluate_model(wrapper, config):
+                    validated = validate_inputs(config)
+                    metrics = wrapper.val(
+                        data=str(validated["dataset_yaml"]), split=config["split"], imgsz=config["imgsz"],
+                        device=config["device"], conf=config["conf"], iou=config["iou"], verbose=False,
+                    )
+                    return {
+                        "map50": float(metrics.box.map50),
+                        "map50_95": float(metrics.box.map),
+                        "precision": float(metrics.box.mp),
+                        "recall": float(metrics.box.mr),
+                    }
+
+
+                def run_layer_sweep(layer_name, config, state):
+                    wrapper, validated = load_dense_wrapper(config)
+                    model = wrapper.model
+                    filters_before = get_module(model, layer_name).out_channels
+                    filters_after = get_module(model, layer_name).out_channels
+                    while filters_after > 1:
+                        module = get_module(model, layer_name)
+                        filters_before_step = module.out_channels
+                        filters_removed = filters_before - filters_before_step + 1
+                        candidate_key = f"{layer_name}:{filters_removed}"
+                        if candidate_key in state["completed"]:
+                            model = prune_output_channel_with_dependencies(model, layer_name, minimum_l1_filter(module), config)
+                            wrapper.model = model
+                            filters_after = get_module(model, layer_name).out_channels
+                            continue
+                        try:
+                            index = minimum_l1_filter(module)
+                            model = prune_output_channel_with_dependencies(model, layer_name, index, config)
+                            wrapper.model = model
+                            metrics = evaluate_model(wrapper, config)
+                            filters_after = get_module(model, layer_name).out_channels
+                            row = {
+                                "candidate_id": f"filterwise-{layer_name.replace('.', '-')}-filters-{filters_removed}",
+                                "stage": "filterwise",
+                                "status": "completed",
+                                "layer": layer_name,
+                                "filters_before": filters_before,
+                                "filters_removed": filters_removed,
+                                "filters_after": filters_after,
+                                "pruned_filter_index": index,
+                                "checkpoint_path": str(validated["checkpoint_path"]),
+                                **metrics,
+                            }
+                            state["rows"].append(row)
+                            state["completed"].add(candidate_key)
+                            write_artifacts(state)
+                        except Exception as exc:
+                            state["rows"].append({
+                                "candidate_id": f"filterwise-{layer_name.replace('.', '-')}-filters-{filters_removed}",
+                                "stage": "filterwise", "status": "failed", "layer": layer_name,
+                                "filters_before": filters_before, "filters_removed": filters_removed,
+                                "error": f"{type(exc).__name__}: {exc}",
+                            })
+                            state["failed"].add(candidate_key)
+                            write_artifacts(state)
+                            break
+                    return state
+                '''
+            ),
             markdown_cell("## Run or resume"),
             code_cell("# Persist results.csv, manifest.json, and progress.json after every result."),
             markdown_cell("## Analysis"),
