@@ -7,7 +7,7 @@ import json
 import math
 import re
 import shutil
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -281,11 +281,21 @@ def _planned_rows(config: Mapping[str, Any]) -> list[Metrics]:
     return rows
 
 
-def _planned_filterwise_rows(config: Mapping[str, Any]) -> list[Metrics]:
+def _planned_filterwise_rows(
+    config: Mapping[str, Any], layer_widths: Mapping[str, int] | None = None
+) -> list[Metrics]:
     pruning = config["pruning"]
-    widths = {str(name): int(width) for name, width in pruning.get("filter_sweep_widths", {}).items()}
     rows: list[Metrics] = [_base_row("baseline", "baseline", ratio=0.0)]
-    for layer in pruning["filter_sweep_layers"]:
+    configured_layers = pruning["filter_sweep_layers"]
+    if configured_layers == "auto":
+        if layer_widths is None:
+            return rows
+        layers = list(layer_widths)
+        widths = {str(name): int(width) for name, width in layer_widths.items()}
+    else:
+        layers = [str(layer) for layer in configured_layers]
+        widths = {str(name): int(width) for name, width in pruning.get("filter_sweep_widths", {}).items()}
+    for layer in layers:
         if layer not in widths:
             raise ValueError(f"filter_sweep_widths must define the output width for {layer!r}.")
         for filters_removed in range(1, widths[layer]):
@@ -300,6 +310,19 @@ def _planned_filterwise_rows(config: Mapping[str, Any]) -> list[Metrics]:
             row["filter_reduction"] = filters_removed / widths[layer]
             _append_row(rows, row)
     return rows
+
+
+def _filterwise_layer_widths(model: Any, layers: Sequence[str]) -> dict[str, int]:
+    from torch import nn
+
+    modules = dict(_unwrap_model(model).named_modules())
+    widths: dict[str, int] = {}
+    for layer in layers:
+        module = modules.get(layer)
+        if not isinstance(module, nn.Conv2d) or int(module.out_channels) <= 1:
+            raise ValueError(f"Automatic filter-wise layer {layer!r} is not a prunable Conv2d module.")
+        widths[layer] = int(module.out_channels)
+    return widths
 
 
 def _screen_probe(row: Mapping[str, Any], baseline_map50_95: float, config: Mapping[str, Any]) -> bool:
@@ -561,17 +584,28 @@ def run_filterwise_evaluation(
     active = adapters or ClusterEvaluationAdapters.defaults(config)
     targets = config["targets"]
     rtx_device = str(targets["rtx_screening_device"])
+    automatic_layers = config["pruning"]["filter_sweep_layers"] == "auto"
     rows = _planned_filterwise_rows(config)
-    rows = _load_filterwise_checkpoint(output_dir, resolved_config_path, rows)
+    if not automatic_layers:
+        rows = _load_filterwise_checkpoint(output_dir, resolved_config_path, rows)
     baseline = rows[0]
 
-    if _row_is_resumable(baseline) and all(
+    if not automatic_layers and _row_is_resumable(baseline) and all(
         _row_is_resumable(row) for row in _rows_for_stage(rows, "filterwise")
     ):
         return rows
 
     try:
         baseline_model = active.load_model(checkpoint)
+        available_layer_order = [str(layer) for layer in active.safe_layers(baseline_model, config)]
+        if automatic_layers:
+            rows = _planned_filterwise_rows(config, _filterwise_layer_widths(baseline_model, available_layer_order))
+            rows = _load_filterwise_checkpoint(output_dir, resolved_config_path, rows)
+            baseline = rows[0]
+            if _row_is_resumable(baseline) and all(
+                _row_is_resumable(row) for row in _rows_for_stage(rows, "filterwise")
+            ):
+                return rows
         if not _row_is_resumable(baseline):
             baseline_metrics = active.evaluate(baseline_model, config, rtx_device)
             baseline_model_stats = active.stats(baseline_model)
@@ -590,21 +624,16 @@ def run_filterwise_evaluation(
         return rows
     _write_artifacts(output_dir, resolved_config_path, rows)
 
-    configured_layers = set(str(layer) for layer in config["pruning"]["filter_sweep_layers"])
-    try:
-        available_layers = set(active.safe_layers(baseline_model, config))
-    except Exception as exc:
-        reason = f"Skipped because layer screening failed: {type(exc).__name__}: {exc}"
-        for row in rows[1:]:
-            _skip(row, reason)
-        _write_artifacts(output_dir, resolved_config_path, rows)
-        return rows
+    configured_layer_order = (
+        available_layer_order if automatic_layers else [str(layer) for layer in config["pruning"]["filter_sweep_layers"]]
+    )
+    configured_layers = set(configured_layer_order)
+    available_layers = set(available_layer_order)
 
     screening = config.get("screening", {})
     step_factory = active.make_filterwise_step or (lambda model, layer, cfg: _filterwise_step(model, layer, cfg))
     checkpoint_writer = active.save_checkpoint or _save_filterwise_checkpoint
-    for layer in config["pruning"]["filter_sweep_layers"]:
-        layer = str(layer)
+    for layer in configured_layer_order:
         layer_rows = sorted(
             (row for row in _rows_for_stage(rows, "filterwise") if row.get("layer") == layer),
             key=lambda row: int(row["filters_removed"]),

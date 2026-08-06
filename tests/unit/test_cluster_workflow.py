@@ -143,6 +143,56 @@ def test_filterwise_planner_requires_a_width_for_each_layer():
         )
 
 
+def test_filterwise_auto_planner_uses_runtime_layer_widths_in_order():
+    rows = _planned_filterwise_rows(
+        {"pruning": {"filter_sweep_layers": "auto"}},
+        layer_widths={"model.2": 3, "model.1": 2},
+    )
+
+    assert [(row["layer"], row["filters_removed"]) for row in rows[1:]] == [
+        ("model.2", 1),
+        ("model.2", 2),
+        ("model.1", 1),
+    ]
+
+
+def test_filterwise_auto_planner_defers_candidates_until_runtime_widths_are_available():
+    rows = _planned_filterwise_rows({"pruning": {"filter_sweep_layers": "auto"}})
+
+    assert [row["stage"] for row in rows] == ["baseline"]
+
+
+def test_filterwise_layer_widths_reads_conv_output_channels():
+    model = SimpleNamespace(model=nn.Sequential(nn.Conv2d(3, 4, kernel_size=1)))
+
+    widths = cluster_workflow._filterwise_layer_widths(model, ["0"])
+
+    assert widths == {"0": 4}
+
+
+def test_filterwise_auto_workflow_expands_safe_layers_after_loading_baseline(monkeypatch, tmp_path, adapters):
+    config = yaml.safe_load(write_config(tmp_path).read_text(encoding="utf-8"))
+    config["pruning"]["filter_sweep_layers"] = "auto"
+    config["pruning"].pop("filter_sweep_widths", None)
+    config["export"] = {"format": "onnx"}
+    config_path = tmp_path / "auto-filterwise.yaml"
+    config_path.write_text(yaml.safe_dump(config), encoding="utf-8")
+    adapters.safe_layers = lambda model, config: ["model.2", "model.1"]
+    monkeypatch.setattr(
+        cluster_workflow,
+        "_filterwise_layer_widths",
+        lambda model, layers: {"model.2": 3, "model.1": 2},
+    )
+
+    rows = run_filterwise_evaluation(config_path, adapters=adapters)
+
+    assert [(row["layer"], row["filters_removed"]) for row in rows[1:]] == [
+        ("model.2", 1),
+        ("model.2", 2),
+        ("model.1", 1),
+    ]
+
+
 def test_filterwise_step_recomputes_minimum_weight_and_removes_one_filter(monkeypatch, tmp_path):
     model = _importance_model()
     config = yaml.safe_load(write_config(tmp_path).read_text(encoding="utf-8"))
