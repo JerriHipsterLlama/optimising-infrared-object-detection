@@ -20,24 +20,13 @@ runtime:
 pruning:
   # Conv0 keeps its one-channel image input; its output filters remain sweepable.
   protected_layers: [model.22]
-  filter_sweep_layers:
-    - model.0.conv
-    - model.2.cv2.conv
-    - model.4.cv2.conv
-    - model.6.cv2.conv
-    - model.8.cv2.conv
-  filter_sweep_widths:
-    model.0.conv: 64
-    model.2.cv2.conv: 128
-    model.4.cv2.conv: 256
-    model.6.cv2.conv: 512
-    model.8.cv2.conv: 512
+  filter_sweep_layers: auto
 
 screening:
   max_map50_95_drop: 0.02
   early_stop: true
-  early_stop_map50_95: 0.001
-  early_stop_consecutive: 2
+  early_stop_map50_95: 0.30
+  early_stop_consecutive: 1
   latency_profile_removals: [7, 8, 9, 15, 16, 17, 23, 24, 25, 31, 32, 33]
 
 targets:

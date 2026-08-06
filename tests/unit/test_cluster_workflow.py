@@ -239,19 +239,16 @@ def test_filterwise_probe_returns_the_pruned_model(monkeypatch, tmp_path):
     assert result is model
 
 
-def test_filterwise_config_uses_the_five_representative_layers():
+def test_filterwise_rtx_config_selects_all_layers_and_stops_below_point_three():
     config = yaml.safe_load(
         Path("configs/experiments/filterwise_rtx_screening.yaml").read_text(encoding="utf-8")
     )
 
-    assert config["pruning"]["filter_sweep_layers"] == [
-        "model.0.conv",
-        "model.2.cv2.conv",
-        "model.4.cv2.conv",
-        "model.6.cv2.conv",
-        "model.8.cv2.conv",
-    ]
-    assert len(_planned_filterwise_rows(config)) == 1468
+    assert config["pruning"]["filter_sweep_layers"] == "auto"
+    assert "filter_sweep_widths" not in config["pruning"]
+    assert config["screening"]["early_stop"] is True
+    assert config["screening"]["early_stop_map50_95"] == 0.30
+    assert config["screening"]["early_stop_consecutive"] == 1
 
 
 def test_filterwise_workflow_profiles_all_candidates_without_serialized_size_gate(monkeypatch, tmp_path, adapters):
