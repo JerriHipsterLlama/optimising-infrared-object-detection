@@ -459,6 +459,28 @@ def test_filterwise_workflow_early_stops_after_consecutive_near_zero_accuracy(tm
     assert all("early stopping" in row["reason"].lower() for row in candidates[2:])
 
 
+def test_filterwise_early_stop_requires_accuracy_strictly_below_threshold(tmp_path, adapters):
+    config_path = write_config(tmp_path)
+    config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    config["pruning"]["safe_layers"] = ["model.1"]
+    config["pruning"]["filter_sweep_layers"] = ["model.1"]
+    config["pruning"]["filter_sweep_widths"] = {"model.1": 4}
+    config["screening"] = {
+        "early_stop": True,
+        "early_stop_map50_95": 0.30,
+        "early_stop_consecutive": 1,
+        "latency_profile_removals": [],
+    }
+    config_path.write_text(yaml.safe_dump(config), encoding="utf-8")
+    accuracies = iter([0.50, 0.30, 0.29, 0.29])
+    adapters.evaluate = lambda model, config, device: _metrics(next(accuracies))
+
+    rows = run_filterwise_evaluation(config_path, adapters=adapters)
+
+    candidates = [row for row in rows if row["stage"] == "filterwise"]
+    assert [row["status"] for row in candidates] == ["screened_out", "screened_out", "skipped"]
+
+
 def test_screen_only_uses_rtx_and_skips_global_candidates(tmp_path, adapters):
     config_path = write_config(tmp_path)
     evaluated_devices = []

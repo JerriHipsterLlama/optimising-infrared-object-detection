@@ -692,7 +692,7 @@ def run_filterwise_evaluation(
                     row["hardware_benchmarked"] = True
                 else:
                     row["export_validation_status"] = "not_required"
-                if float(row["map50_95"]) <= float(screening.get("early_stop_map50_95", 0.0)):
+                if float(row["map50_95"]) < float(screening.get("early_stop_map50_95", 0.0)):
                     consecutive_near_zero += 1
                 else:
                     consecutive_near_zero = 0
