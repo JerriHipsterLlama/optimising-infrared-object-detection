@@ -225,7 +225,7 @@ After the implementation is verified, run without the full-curve flag:
 
 ```powershell
 $env:PYTHONPATH = (Join-Path (Get-Location).Path 'src')
-.venv\Scripts\python.exe apps\evaluate.py filterwise --config configs\experiments\filterwise_rtx_screening.yaml
+.venv\Scripts\python.exe apps\evaluate_cluster_pruning.py --filterwise --config configs\experiments\filterwise_rtx_screening.yaml
 ```
 
 This command evaluates every discovered safe layer, preserves one-filter increments, and stops the current layer after its measured mAP50-95 is below 0.30.
