@@ -193,6 +193,31 @@ def test_filterwise_auto_workflow_expands_safe_layers_after_loading_baseline(mon
     ]
 
 
+def test_filterwise_auto_workflow_resumes_completed_candidates(monkeypatch, tmp_path, adapters):
+    config = yaml.safe_load(write_config(tmp_path).read_text(encoding="utf-8"))
+    config["pruning"]["filter_sweep_layers"] = "auto"
+    config["pruning"].pop("filter_sweep_widths", None)
+    config["export"] = {"format": "onnx"}
+    config_path = tmp_path / "auto-filterwise-resume.yaml"
+    config_path.write_text(yaml.safe_dump(config), encoding="utf-8")
+    adapters.safe_layers = lambda model, config: ["model.1"]
+    monkeypatch.setattr(cluster_workflow, "_filterwise_layer_widths", lambda model, layers: {"model.1": 3})
+    evaluations = {"count": 0}
+
+    def evaluate(model, config, device):
+        del model, config, device
+        evaluations["count"] += 1
+        return _metrics(0.50)
+
+    adapters.evaluate = evaluate
+
+    run_filterwise_evaluation(config_path, adapters=adapters)
+    completed_evaluations = evaluations["count"]
+    run_filterwise_evaluation(config_path, adapters=adapters)
+
+    assert evaluations["count"] == completed_evaluations
+
+
 def test_filterwise_step_recomputes_minimum_weight_and_removes_one_filter(monkeypatch, tmp_path):
     model = _importance_model()
     config = yaml.safe_load(write_config(tmp_path).read_text(encoding="utf-8"))
