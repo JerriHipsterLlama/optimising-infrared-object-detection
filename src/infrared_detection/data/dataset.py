@@ -65,7 +65,7 @@ class CAMELDataset(Dataset):
         
         # Load image paths (support multiple formats)
         self.image_files = []
-        for ext in ['*.png', '*.jpg', '*.jpeg', '*.npy']:
+        for ext in ['.png', '.jpg', '.jpeg', '.npy']:
             self.image_files.extend(sorted(self.images_dir.glob(f"Seq*{ext}")))
         self.image_files = sorted(set(self.image_files))  # Remove duplicates
         
