@@ -6,6 +6,7 @@ from infrared_detection.compression.pruning import (
     compute_channel_importance,
     minimum_weight_scores,
     rank_filters_by_minimum_weight,
+    synchronize_module_channel_metadata,
     validate_structural_reduction,
 )
 
@@ -64,3 +65,16 @@ def test_structural_reduction_requires_fewer_parameters():
 
     assert summary["parameter_reduction"] == pytest.approx(0.4)
     assert summary["serialized_reduction"] == pytest.approx(0.4)
+
+
+def test_channel_metadata_matches_physically_pruned_tensor_shapes():
+    model = _TinyNetwork()
+    model.conv.out_channels = 99
+    model.conv.in_channels = 98
+    model.head.in_channels = 97
+
+    synchronize_module_channel_metadata(model)
+
+    assert model.conv.out_channels == model.conv.weight.shape[0] == 4
+    assert model.conv.in_channels == model.conv.weight.shape[1] == 3
+    assert model.head.in_channels == model.head.weight.shape[1] == 4

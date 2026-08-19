@@ -17,6 +17,21 @@ def _find_module(graph: DependencyGraph, name: str) -> nn.Module:
         raise KeyError(f"Module is not a registered prunable layer: {name}") from exc
 
 
+def synchronize_module_channel_metadata(model: nn.Module) -> nn.Module:
+    """Synchronize declared channel counts with physically pruned tensor shapes."""
+
+    for module in model.modules():
+        if isinstance(module, nn.Conv2d):
+            module.out_channels = int(module.weight.shape[0])
+            module.in_channels = int(module.weight.shape[1]) * module.groups
+        elif isinstance(module, nn.BatchNorm2d):
+            module.num_features = int(module.weight.shape[0])
+        elif isinstance(module, nn.Linear):
+            module.out_features = int(module.weight.shape[0])
+            module.in_features = int(module.weight.shape[1])
+    return model
+
+
 def prune_yolo_channels(graph: DependencyGraph, channel_masks: Mapping[str, torch.Tensor]) -> nn.Module:
     """Physically prune selected output channels and propagate dependencies."""
 
@@ -39,7 +54,7 @@ def prune_yolo_channels(graph: DependencyGraph, channel_masks: Mapping[str, torc
         if not graph.graph.check_pruning_group(group):
             raise ValueError(f"Dependency graph rejected pruning group for {name}.")
         group.prune()
-    return graph.model
+    return synchronize_module_channel_metadata(graph.model)
 
 
 def validate_structural_reduction(before: Mapping[str, float], after: Mapping[str, float]) -> dict[str, float]:
