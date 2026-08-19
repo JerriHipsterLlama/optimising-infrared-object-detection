@@ -7,7 +7,7 @@ import csv
 import json
 from collections import defaultdict
 from pathlib import Path
-from typing import Any
+from typing import Any, Sequence
 
 import matplotlib.pyplot as plt
 
@@ -29,10 +29,26 @@ def _load_manifest(name: str) -> list[dict[str, Any]]:
     return json.loads(path.read_text(encoding="utf-8"))["rows"]
 
 
-def _load_filterwise() -> list[dict[str, Any]]:
-    path = EXPERIMENTS / "filterwise_rtx_screening" / "candidates.csv"
-    with path.open(newline="", encoding="utf-8") as handle:
-        return list(csv.DictReader(handle))
+def _load_single_layer_results(paths: Sequence[Path]) -> dict[str, list[dict[str, Any]]]:
+    grouped: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for path in paths:
+        with path.open(newline="", encoding="utf-8") as handle:
+            for row in csv.DictReader(handle):
+                if row.get("stage") != "single_layer" or row.get("status") != "completed":
+                    continue
+                if any(_number(row.get(field)) is None for field in ("filters_remaining", "map50_95", "latency_p50_ms")):
+                    continue
+                key = "/".join(
+                    (
+                        str(row.get("model_variant") or "unknown-model"),
+                        str(row.get("hardware") or "unknown-hardware"),
+                        str(row.get("layer") or "unknown-layer"),
+                    )
+                )
+                grouped[key].append(row)
+    for rows in grouped.values():
+        rows.sort(key=lambda row: int(row["filters_remaining"]), reverse=True)
+    return dict(sorted(grouped.items()))
 
 
 def _style() -> None:
@@ -48,63 +64,39 @@ def _style() -> None:
     )
 
 
-def plot_filterwise(rows: list[dict[str, Any]], output: Path) -> dict[str, list[dict[str, Any]]]:
-    baseline = next(row for row in rows if row["candidate_id"] == "baseline")
-    baseline_map = float(baseline["map50_95"])
-    grouped: dict[str, list[dict[str, Any]]] = defaultdict(list)
-    for row in rows:
-        if row.get("stage") == "filterwise" and row.get("status") in {"screened_in", "screened_out"}:
-            if _number(row.get("map50_95")) is not None:
-                grouped[str(row["layer"])].append(row)
-    for layer_rows in grouped.values():
-        layer_rows.sort(key=lambda row: int(row["filters_removed"]))
+def plot_single_layer(
+    paths: Sequence[Path], output: Path
+) -> dict[str, list[dict[str, Any]]]:
+    grouped = _load_single_layer_results(paths)
+    if not grouped:
+        raise ValueError("No completed single-layer accuracy and latency rows were found")
 
-    fig, axes = plt.subplots(2, 3, figsize=(10.8, 5.8), constrained_layout=True)
-    axes_flat = axes.ravel()
-    for axis, (layer, layer_rows) in zip(axes_flat, sorted(grouped.items())):
-        removed = [int(row["filters_removed"]) for row in layer_rows]
-        map_values = [float(row["map50_95"]) for row in layer_rows]
-        statuses = [row["status"] for row in layer_rows]
-        safe_x = [x for x, status in zip(removed, statuses) if status == "screened_in"]
-        safe_y = [y for y, status in zip(map_values, statuses) if status == "screened_in"]
-        rejected_x = [x for x, status in zip(removed, statuses) if status == "screened_out"]
-        rejected_y = [y for y, status in zip(map_values, statuses) if status == "screened_out"]
-        axis.plot(removed, map_values, color="#4C78A8", linewidth=1.2)
-        axis.scatter(safe_x, safe_y, color="#2A9D8F", s=12, label="screened in")
-        axis.scatter(rejected_x, rejected_y, color="#E76F51", s=14, marker="x", label="screened out")
-        axis.axhline(baseline_map, color="#555555", linewidth=0.9, linestyle="--", label="baseline")
-        axis.axhline(baseline_map - TARGET_DROP, color="#E9C46A", linewidth=0.9, linestyle=":", label="1 pp drop")
-        axis.set_title(layer)
-        axis.set_xlabel("Filters removed")
-        axis.set_ylabel("mAP50–95")
-        axis.grid(alpha=0.22)
-    for axis in axes_flat[len(grouped) :]:
-        axis.axis("off")
-    handles, labels = axes_flat[0].get_legend_handles_labels()
-    fig.legend(handles, labels, loc="lower right", ncol=4, frameon=False)
-    fig.suptitle("Filterwise pruning: measured mAP50–95 response by layer", y=1.02, fontsize=12)
-    fig.savefig(output / "01_filterwise_accuracy.png", bbox_inches="tight")
-    plt.close(fig)
-
-    fig, axis = plt.subplots(figsize=(10.8, 4.3), constrained_layout=True)
-    for layer, layer_rows in sorted(grouped.items()):
-        measured = [row for row in layer_rows if _number(row.get("latency_p50_ms")) is not None]
-        if measured:
+    figures = (
+        ("map50_95", "mAP50–95", "Single-layer pruning: accuracy response", "01_single_layer_accuracy.png"),
+        (
+            "latency_p50_ms",
+            "PyTorch CUDA forward latency p50 (ms)",
+            "Single-layer pruning: direct CUDA latency response",
+            "02_single_layer_latency.png",
+        ),
+    )
+    for metric, ylabel, title, filename in figures:
+        fig, axis = plt.subplots(figsize=(11.5, 5.2), constrained_layout=True)
+        for key, rows in grouped.items():
             axis.plot(
-                [int(row["filters_removed"]) for row in measured],
-                [float(row["latency_p50_ms"]) for row in measured],
-                marker="o",
-                markersize=3,
+                [int(row["filters_remaining"]) for row in rows],
+                [float(row[metric]) for row in rows],
                 linewidth=1.1,
-                label=layer,
+                label=key,
             )
-    axis.set_xlabel("Filters removed")
-    axis.set_ylabel("TensorRT latency p50 (ms)")
-    axis.set_title("Filterwise pruning: available RTX 3070 latency samples")
-    axis.grid(alpha=0.25)
-    axis.legend(ncol=3, frameon=False)
-    fig.savefig(output / "02_filterwise_latency.png", bbox_inches="tight")
-    plt.close(fig)
+        axis.invert_xaxis()
+        axis.set_xlabel("Filters remaining")
+        axis.set_ylabel(ylabel)
+        axis.set_title(title)
+        axis.grid(alpha=0.25)
+        axis.legend(frameon=False, fontsize=6, ncol=2)
+        fig.savefig(output / filename, bbox_inches="tight")
+        plt.close(fig)
     return grouped
 
 
@@ -198,7 +190,7 @@ def _format_ratio_list(records: list[dict[str, Any]], precision: str) -> str:
 
 def write_briefing(
     output: Path,
-    filterwise: dict[str, list[dict[str, Any]]],
+    single_layer: dict[str, list[dict[str, Any]]],
     backbone: list[dict[str, Any]],
     neck: list[dict[str, Any]],
 ) -> None:
@@ -215,22 +207,22 @@ def write_briefing(
         "",
         "## Figures",
         "",
-        "1. `01_filterwise_accuracy.png` — measured layerwise sensitivity curves.",
-        "2. `02_filterwise_latency.png` — available latency samples from the layerwise sweep.",
+        "1. `01_single_layer_accuracy.png` — independent single-layer mAP50–95 sensitivity curves.",
+        "2. `02_single_layer_latency.png` — direct PyTorch CUDA forward-latency curves.",
         "3. `03_backbone_compression_matrix.png` — validated backbone-only compression matrix results.",
         "4. `04_neck_pruning_warning.png` — exploratory backbone-plus-neck accuracy and recall loss.",
         "",
-        "## Filterwise pruning coverage",
+        "## Single-layer performance-response coverage",
         "",
-        "| Layer | Completed accuracy points | Filters removed tested | Interpretation |",
+        "| Model / hardware / layer | Completed points | Filters remaining tested | Interpretation |",
         "|---|---:|---:|---|",
     ]
-    for layer, rows in sorted(filterwise.items()):
-        removed = [int(row["filters_removed"]) for row in rows]
-        lines.append(f"| `{layer}` | {len(rows)} | {min(removed)}–{max(removed)} | Use this curve to choose layer-specific pruning tolerance. |")
+    for key, rows in single_layer.items():
+        remaining = [int(row["filters_remaining"]) for row in rows]
+        lines.append(f"| `{key}` | {len(rows)} | {min(remaining)}–{max(remaining)} | Use this curve to identify layer sensitivity and hardware-aligned latency steps. |")
     lines += [
         "",
-        "The latency samples are sparse relative to the accuracy sweep, so they should be interpreted as preliminary RTX 3070 measurements rather than a final hardware conclusion.",
+        "These latency values are direct PyTorch CUDA forward measurements. RTX 3070 results are preliminary; final deployment claims require the equivalent sweep on the Jetson Orin Nano.",
         "",
         "## Validated backbone-only compression matrix (`*_run_1`, `*_run_2`)",
         "",
@@ -261,32 +253,43 @@ def write_briefing(
         "",
         "## Supervisor-ready takeaway",
         "",
-        "1. The filterwise experiment provides the evidence for selecting pruning targets and cluster-aligned removal steps, rather than assuming every YOLO layer is equally tolerant.",
+        "1. The independent single-layer experiment provides evidence for selecting pruning targets and cluster-aligned removal steps, rather than assuming every YOLO layer is equally tolerant.",
         "2. The backbone-only matrix identifies conservative pruning ratios that retain accuracy within the one-percentage-point mAP50–95 criterion. FP32 ratio 0.30 was accepted in both runs; for FP16, ratio 0.20 was accepted in Run 1 and ratio 0.19 is the conservative Run 2 candidate. All finalists require Jetson Orin Nano confirmation.",
-        "3. The unvalidated neck-pruning result is a useful negative result: adding neck layers causes an immediate mAP loss at ratio 0.10 and a severe mAP/recall collapse from ratio 0.20. Those layers require their own filterwise sensitivity study before reuse in a combined structured-pruning configuration.",
+        "3. The unvalidated neck-pruning result is a useful negative result: adding neck layers causes an immediate mAP loss at ratio 0.10 and a severe mAP/recall collapse from ratio 0.20. Those layers require their own single-layer sensitivity study before reuse in a combined structured-pruning configuration.",
         "",
         "## Hardware note",
         "",
-        "These are preliminary RTX 3070 TensorRT measurements at 352×352 input resolution. Final latency and energy claims must be measured on the Jetson Orin Nano.",
+        "The sensitivity curves use direct PyTorch CUDA forward latency at 352×352 input resolution. Compression-matrix latency remains deployment-engine evidence. Final latency and energy claims must be measured on the Jetson Orin Nano.",
     ]
     (output / "README.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
-def main() -> None:
+def main(argv: Sequence[str] | None = None) -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output", type=Path, default=OUTPUT_DEFAULT)
-    args = parser.parse_args()
+    parser.add_argument(
+        "--single-layer-results",
+        action="append",
+        type=Path,
+        default=[],
+        help="Repeatable path to a single-layer performance results.csv file.",
+    )
+    args = parser.parse_args(argv)
     output = args.output.resolve()
     output.mkdir(parents=True, exist_ok=True)
     _style()
-    filterwise = plot_filterwise(_load_filterwise(), output)
+    single_layer_paths = args.single_layer_results or [
+        EXPERIMENTS / "single_layer_performance_screening" / "yolov8n" / "rtx3070" / "results.csv",
+        EXPERIMENTS / "single_layer_performance_screening" / "yolov8m" / "rtx3070" / "results.csv",
+    ]
+    single_layer = plot_single_layer(single_layer_paths, output)
     backbone = plot_backbone(
         _load_manifest("rtx_compression_matrix_run_1"),
         _load_manifest("rtx_compression_matrix_run_2"),
         output,
     )
     neck = plot_neck(_load_manifest("rtx_compression_matrix"), output)
-    write_briefing(output, filterwise, backbone, neck)
+    write_briefing(output, single_layer, backbone, neck)
     print(output)
 
 

@@ -150,14 +150,18 @@ The compression-matrix `runtime.evaluation_device` is intentionally `cpu` for Te
 
 TensorRT 11.1 no longer accepts the legacy `trtexec --fp16`, `--int8`, and `--calib` flags. FP16 is prepared through the ModelOpt autocast boundary before engine building. INT8 is intentionally excluded from the current configuration and will require a separate ModelOpt calibration-data workflow.
 
-### Kaggle filterwise sensitivity sweep
+### Single-layer performance-response screening
 
-Use [notebooks/kaggle_filterwise_sensitivity.ipynb](notebooks/kaggle_filterwise_sensitivity.ipynb) to measure one-filter-at-a-time pruning sensitivity for every supported YOLO convolution layer on a Kaggle GPU.
+The replacement screening workflow independently prunes each selected convolutional layer from its dense checkpoint, one MinimumWeight-ranked filter at a time, until one filter remains. Run the model and hardware combinations with:
 
-- Upload validation JPG/PNG images, YOLO labels, `dataset.yaml`, and `best.pt` as one private Kaggle Dataset.
-- Do not upload Duplicate NPY image files; they duplicate the image package and are not used by the notebook.
-- Open the notebook, update `CONFIG["input_root"]` to the attached Kaggle Dataset path, and enable a Kaggle GPU.
-- Download or version the `filterwise_sensitivity` working-directory output after each session to resume safely.
+```powershell
+python apps/single_layer_performance_screening.py --config configs/experiments/single_layer_performance_yolov8n_rtx.yaml
+python apps/single_layer_performance_screening.py --config configs/experiments/single_layer_performance_yolov8m_rtx.yaml
+python apps/single_layer_performance_screening.py --config configs/experiments/single_layer_performance_yolov8n_orin.yaml
+python apps/single_layer_performance_screening.py --config configs/experiments/single_layer_performance_yolov8m_orin.yaml
+```
+
+Each configuration writes a resumable `results.csv` beneath `runs/experiments/single_layer_performance_screening/<model>/<hardware>/`. Its leading columns show the candidate, status, filters remaining, mAP50–95, and latency so progress can be inspected while the sweep runs. Latency is direct PyTorch CUDA forward latency on the named device; this sensitivity workflow deliberately produces no ONNX, TensorRT, or other deployment exports.
 
 ## Repository layout
 

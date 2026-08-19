@@ -17,7 +17,7 @@ def test_evaluation_apps_expose_help():
         assert result.returncode == 0, result.stderr
 
 
-def test_cluster_pruning_app_exposes_filterwise_mode():
+def test_cluster_pruning_app_does_not_expose_removed_filterwise_modes():
     result = subprocess.run(
         [sys.executable, "apps/evaluate_cluster_pruning.py", "--help"],
         capture_output=True,
@@ -26,8 +26,8 @@ def test_cluster_pruning_app_exposes_filterwise_mode():
     )
 
     assert result.returncode == 0, result.stderr
-    assert "--filterwise" in result.stdout
-    assert "--full-curve" in result.stdout
+    assert "--filterwise" not in result.stdout
+    assert "--full-curve" not in result.stdout
 
 
 def test_matrix_app_exposes_config_and_dry_run():

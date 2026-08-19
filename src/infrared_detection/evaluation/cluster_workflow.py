@@ -21,13 +21,6 @@ Metrics = dict[str, Any]
 
 _ORIN_TARGET = "jetson_orin_nano"
 _FEASIBLE_STATUSES = frozenset({"primary_feasible", "exploratory_feasible"})
-_RESUMABLE_FILTERWISE_STATUSES = frozenset({"completed", "screened_in", "screened_out", "rejected_accuracy"})
-_TERMINAL_FILTERWISE_STATUSES = frozenset({"skipped"})
-_FILTERWISE_CHANNEL_MISMATCH_RE = re.compile(
-    r"Given groups=\d+, weight of size \[\d+, \d+, \d+, \d+\], "
-    r"expected input\[\d+, \d+, \d+, \d+\] to have \d+ channels, "
-    r"but got \d+ channels instead"
-)
 _JETSON_HARDWARE_FIELDS = (
     "latency_mean_ms",
     "latency_p50_ms",
@@ -68,8 +61,6 @@ class ClusterEvaluationAdapters:
     stats: Callable[[Any], Metrics]
     artifact_stats: Callable[[Path], Metrics] | None = None
     validate_reduction: Callable[[Mapping[str, Any], Mapping[str, Any]], Metrics] | None = None
-    make_filterwise_step: Callable[[Any, str, Mapping[str, Any]], Any] | None = None
-    save_checkpoint: Callable[[Any, Path], Path] | None = None
 
     @classmethod
     def defaults(cls, config: Mapping[str, Any]) -> "ClusterEvaluationAdapters":
@@ -88,8 +79,6 @@ class ClusterEvaluationAdapters:
             stats=_collect_stats,
             artifact_stats=_artifact_stats,
             validate_reduction=_validate_structural_reduction,
-            make_filterwise_step=lambda model, layer, config: _filterwise_step(model, layer, config),
-            save_checkpoint=_save_filterwise_checkpoint,
         )
 
 
@@ -106,11 +95,6 @@ def _candidate_id(stage: str, *, layer: str | None = None, cluster_size: int | N
     if ratio is not None:
         parts.append(f"ratio-{ratio:g}")
     return "-".join(parts)
-
-
-def _filterwise_candidate_id(layer: str, filters_removed: int) -> str:
-    slug = re.sub(r"[^A-Za-z0-9]+", "-", layer).strip("-")
-    return f"filterwise-{slug}-filters-{filters_removed}"
 
 
 def _base_row(
@@ -287,50 +271,6 @@ def _planned_rows(config: Mapping[str, Any]) -> list[Metrics]:
     return rows
 
 
-def _planned_filterwise_rows(
-    config: Mapping[str, Any], layer_widths: Mapping[str, int] | None = None
-) -> list[Metrics]:
-    pruning = config["pruning"]
-    rows: list[Metrics] = [_base_row("baseline", "baseline", ratio=0.0)]
-    configured_layers = pruning["filter_sweep_layers"]
-    if configured_layers == "auto":
-        if layer_widths is None:
-            return rows
-        layers = list(layer_widths)
-        widths = {str(name): int(width) for name, width in layer_widths.items()}
-    else:
-        layers = [str(layer) for layer in configured_layers]
-        widths = {str(name): int(width) for name, width in pruning.get("filter_sweep_widths", {}).items()}
-    for layer in layers:
-        if layer not in widths:
-            raise ValueError(f"filter_sweep_widths must define the output width for {layer!r}.")
-        for filters_removed in range(1, widths[layer]):
-            row = _base_row(
-                _filterwise_candidate_id(layer, filters_removed),
-                "filterwise",
-                layer=layer,
-            )
-            row["filters_before"] = widths[layer]
-            row["filters_removed"] = filters_removed
-            row["filters_after"] = widths[layer] - filters_removed
-            row["filter_reduction"] = filters_removed / widths[layer]
-            _append_row(rows, row)
-    return rows
-
-
-def _filterwise_layer_widths(model: Any, layers: Sequence[str]) -> dict[str, int]:
-    from torch import nn
-
-    modules = dict(_unwrap_model(model).named_modules())
-    widths: dict[str, int] = {}
-    for layer in layers:
-        module = modules.get(layer)
-        if not isinstance(module, nn.Conv2d) or int(module.weight.shape[0]) <= 1:
-            raise ValueError(f"Automatic filter-wise layer {layer!r} is not a prunable Conv2d module.")
-        widths[layer] = int(module.weight.shape[0])
-    return widths
-
-
 def _screen_probe(row: Mapping[str, Any], baseline_map50_95: float, config: Mapping[str, Any]) -> bool:
     screening = config.get("screening", {})
     max_drop = float(screening.get("max_map50_95_drop", 0.02))
@@ -354,9 +294,6 @@ def _metrics_row(row: Metrics, metrics: Mapping[str, Any], stats: Mapping[str, A
 def _failure(row: Metrics, exc: Exception) -> None:
     row["status"] = "failed"
     row["error"] = f"{type(exc).__name__}: {exc}"
-    if row.get("stage") == "filterwise" and _is_filterwise_channel_mismatch(row["error"]):
-        row["status"] = "skipped"
-        row["reason"] = "Skipped because structural channel mismatch: " + row["error"]
 
 
 def _skip(row: Metrics, reason: str) -> None:
@@ -398,21 +335,6 @@ def _validate_structural_reduction(before: Mapping[str, Any], after: Mapping[str
     if float(after["serialized_bytes"]) >= float(before["serialized_bytes"]):
         raise ValueError("Serialized artifact did not reduce in the comparable export format.")
     return reduction
-
-
-def _validate_filterwise_reduction(before: Mapping[str, Any], after: Mapping[str, Any]) -> Metrics:
-    """Validate parameter reduction without requiring the engine file to shrink."""
-
-    before_params = float(before["parameter_count"])
-    after_params = float(after["parameter_count"])
-    if after_params >= before_params:
-        raise ValueError("Structured pruning did not reduce parameter count.")
-    result = {"parameter_reduction": 1.0 - after_params / before_params}
-    if "serialized_bytes" in before and "serialized_bytes" in after:
-        before_bytes = float(before["serialized_bytes"])
-        after_bytes = float(after["serialized_bytes"])
-        result["serialized_reduction"] = 1.0 - after_bytes / before_bytes
-    return result
 
 
 def _validate_candidate_reduction(
@@ -575,161 +497,6 @@ def run_cluster_evaluation(
     return rows
 
 
-def run_filterwise_evaluation(
-    config_path: Path,
-    dry_run: bool = False,
-    adapters: ClusterEvaluationAdapters | None = None,
-    full_curve: bool = False,
-) -> list[Metrics]:
-    """Sequentially measure accuracy and selected latency points per layer."""
-
-    config, checkpoint, output_dir, resolved_config_path = _resolve_config(Path(config_path))
-    if dry_run:
-        rows = _planned_filterwise_rows(config)
-        rows = _load_filterwise_checkpoint(output_dir, resolved_config_path, rows)
-        _write_artifacts(output_dir, resolved_config_path, rows)
-        return rows
-
-    active = adapters or ClusterEvaluationAdapters.defaults(config)
-    targets = config["targets"]
-    rtx_device = str(targets["rtx_screening_device"])
-    automatic_layers = config["pruning"]["filter_sweep_layers"] == "auto"
-    rows = _planned_filterwise_rows(config)
-    if not automatic_layers:
-        rows = _load_filterwise_checkpoint(output_dir, resolved_config_path, rows)
-    baseline = rows[0]
-
-    if not automatic_layers and _row_is_resumable(baseline) and all(
-        _row_is_resumable(row) for row in _rows_for_stage(rows, "filterwise")
-    ):
-        return rows
-
-    try:
-        baseline_model = active.load_model(checkpoint)
-        available_layer_order = [str(layer) for layer in active.safe_layers(baseline_model, config)]
-        if automatic_layers:
-            rows = _planned_filterwise_rows(config, _filterwise_layer_widths(baseline_model, available_layer_order))
-            rows = _load_filterwise_checkpoint(output_dir, resolved_config_path, rows)
-            baseline = rows[0]
-            if _row_is_resumable(baseline) and all(
-                _row_is_resumable(row) for row in _rows_for_stage(rows, "filterwise")
-            ):
-                return rows
-        if not _row_is_resumable(baseline):
-            baseline_metrics = active.evaluate(baseline_model, config, rtx_device)
-            baseline_model_stats = active.stats(baseline_model)
-            baseline_export = Path(active.export(checkpoint, config, output_dir / "baseline"))
-            _record_export(baseline, baseline_export)
-            baseline_artifact_stats = (active.artifact_stats or _artifact_stats)(baseline_export)
-            _metrics_row(baseline, baseline_metrics, {**dict(baseline_model_stats), **dict(baseline_artifact_stats)})
-            baseline["status"] = "completed"
-            baseline["screening_device"] = rtx_device
-            baseline["evaluation_device"] = rtx_device
-    except Exception as exc:
-        _failure(baseline, exc)
-        for row in rows[1:]:
-            _skip(row, f"Skipped because baseline failed: {baseline['error']}")
-        _write_artifacts(output_dir, resolved_config_path, rows)
-        return rows
-    _write_artifacts(output_dir, resolved_config_path, rows)
-
-    configured_layer_order = (
-        available_layer_order if automatic_layers else [str(layer) for layer in config["pruning"]["filter_sweep_layers"]]
-    )
-    configured_layers = set(configured_layer_order)
-    available_layers = set(available_layer_order)
-
-    screening = config.get("screening", {})
-    step_factory = active.make_filterwise_step or (lambda model, layer, cfg: _filterwise_step(model, layer, cfg))
-    checkpoint_writer = active.save_checkpoint or _save_filterwise_checkpoint
-    for layer in configured_layer_order:
-        layer_rows = sorted(
-            (row for row in _rows_for_stage(rows, "filterwise") if row.get("layer") == layer),
-            key=lambda row: int(row["filters_removed"]),
-        )
-        if layer not in configured_layers or layer not in available_layers:
-            for row in layer_rows:
-                _skip(row, f"Skipped because filter-wise layer screening excluded {layer}.")
-            _write_artifacts(output_dir, resolved_config_path, rows)
-            continue
-        recorded = [_row_is_recorded(row) for row in layer_rows]
-        if all(recorded):
-            continue
-        checkpointed = [
-            (index, row)
-            for index, row in enumerate(layer_rows)
-            if _row_is_resumable(row)
-        ]
-        if checkpointed:
-            checkpoint_index, checkpoint_row = checkpointed[-1]
-            current_model = active.load_model(Path(checkpoint_row["checkpoint_path"]))
-            pending_rows = [
-                row for row in layer_rows[checkpoint_index + 1:]
-                if not _row_is_recorded(row)
-            ]
-        else:
-            current_model = active.load_model(checkpoint)
-            pending_rows = [row for row in layer_rows if not _row_is_recorded(row)]
-        if not pending_rows:
-            continue
-        consecutive_near_zero = 0
-        for row in pending_rows:
-            try:
-                current_model = step_factory(current_model, layer, config)
-                checkpoint_path = Path(checkpoint_writer(current_model, output_dir / row["candidate_id"]))
-                row["checkpoint_path"] = str(checkpoint_path)
-                if checkpoint_path.exists():
-                    row["checkpoint_bytes"] = checkpoint_path.stat().st_size
-                # Ultralytics validation may fuse modules and create inference-mode
-                # tensors in-place. Keep the sequentially prunable model separate
-                # so the next minimum-weight step still has a trainable model.
-                evaluation_model = active.load_model(checkpoint_path)
-                metrics = active.evaluate(evaluation_model, config, rtx_device)
-                model_stats = dict(active.stats(current_model))
-                _metrics_row(row, metrics, model_stats, baseline)
-                row["screening_device"] = rtx_device
-                row["evaluation_device"] = rtx_device
-                row["status"] = (
-                    "screened_in"
-                    if float(row["map50_95"]) >= float(baseline["map50_95"])
-                    - float(screening.get("max_map50_95_drop", 0.02))
-                    else "screened_out"
-                )
-                if _should_profile_filterwise(row, config):
-                    exported = Path(active.export(checkpoint_path, config, output_dir / row["candidate_id"]))
-                    _record_export(row, exported, baseline)
-                    artifact_stats = active.artifact_stats or _artifact_stats
-                    after = {**model_stats, **dict(artifact_stats(exported))}
-                    row.update(
-                        _validate_filterwise_reduction(
-                            {"parameter_count": baseline["parameter_count"]},
-                            after,
-                        )
-                    )
-                    row["export_validation_status"] = "passed"
-                    row.update(active.profile(exported, rtx_device))
-                    row["profile_device"] = rtx_device
-                    row["hardware_benchmarked"] = True
-                else:
-                    row["export_validation_status"] = "not_required"
-                if float(row["map50_95"]) < float(screening.get("early_stop_map50_95", 0.0)):
-                    consecutive_near_zero += 1
-                else:
-                    consecutive_near_zero = 0
-            except Exception as exc:
-                _failure(row, exc)
-                consecutive_near_zero = 0
-            finally:
-                _write_artifacts(output_dir, resolved_config_path, rows)
-            if _filterwise_stop_reached(consecutive_near_zero, config, full_curve):
-                for remaining in pending_rows[pending_rows.index(row) + 1:]:
-                    _skip(remaining, "Skipped because early stopping detected near-zero accuracy.")
-                _write_artifacts(output_dir, resolved_config_path, rows)
-                break
-
-    return rows
-
-
 def _unwrap_model(model: Any) -> Any:
     return getattr(model, "model", model)
 
@@ -832,178 +599,6 @@ def _structural_probe(model: Any, layer: str, cluster_size: int, ratio: float, c
         model.model = unwrapped
         return model
     return unwrapped
-
-
-def _filterwise_probe(model: Any, layer: str, filters_removed: int, config: Mapping[str, Any]) -> Any:
-    import torch
-    from torch import nn
-
-    from infrared_detection.compression.pruning import compute_channel_importance
-    from infrared_detection.compression.pruning.cluster_probe import run_filterwise_probe as prune
-
-    unwrapped = _unwrap_model(model)
-    module = dict(unwrapped.named_modules()).get(layer)
-    if not isinstance(module, nn.Conv2d):
-        raise ValueError(f"Filter-wise probe target {layer!r} is not a prunable Conv2d module.")
-    if filters_removed <= 0 or filters_removed >= int(module.weight.shape[0]):
-        raise ValueError(f"Filter-wise probe for {layer!r} must remove between 1 and output_channels - 1 filters.")
-    scores = compute_channel_importance(unwrapped)
-    if layer not in scores:
-        raise ValueError(f"No channel-importance scores are available for prunable layer {layer!r}.")
-    ranked = torch.argsort(scores[layer]).tolist()
-    indices = tuple(int(index) for index in ranked[:filters_removed])
-    image_size = int(config["experiment"]["image_size"])
-    aligned_image_size = ((image_size + 31) // 32) * 32
-    pruned = prune(
-        unwrapped,
-        torch.zeros(1, 3, aligned_image_size, aligned_image_size),
-        layer,
-        indices,
-    )
-    if hasattr(model, "model"):
-        model.model = pruned
-        return model
-    return pruned
-
-
-def _row_is_resumable(row: Mapping[str, Any]) -> bool:
-    """Return whether a checkpoint row contains enough data to skip rerunning it."""
-
-    common = (
-        row.get("status") in _RESUMABLE_FILTERWISE_STATUSES
-        and row.get("map50_95") is not None
-        and row.get("parameter_count") is not None
-    )
-    if row.get("stage") == "baseline":
-        exported_path = row.get("exported_path")
-        return bool(
-            common
-            and row.get("serialized_bytes") is not None
-            and exported_path
-            and Path(str(exported_path)).is_file()
-        )
-    checkpoint_path = row.get("checkpoint_path")
-    return bool(common and checkpoint_path and Path(str(checkpoint_path)).is_file())
-
-
-def _row_is_recorded(row: Mapping[str, Any]) -> bool:
-    """Return whether a candidate result is final even if its checkpoint was cleaned up."""
-
-    if row.get("stage") != "filterwise":
-        return _row_is_resumable(row)
-    return bool(
-        row.get("status") in _RESUMABLE_FILTERWISE_STATUSES
-        and row.get("map50_95") is not None
-        and row.get("parameter_count") is not None
-    ) or _row_is_terminal_exclusion(row)
-
-
-def _should_profile_filterwise(row: Mapping[str, Any], config: Mapping[str, Any]) -> bool:
-    points = config.get("screening", {}).get("latency_profile_removals")
-    if points is None:
-        return True
-    return int(row["filters_removed"]) in {int(point) for point in points}
-
-
-def _filterwise_stop_reached(consecutive_near_zero: int, config: Mapping[str, Any], full_curve: bool) -> bool:
-    screening = config.get("screening", {})
-    if full_curve or not bool(screening.get("early_stop", False)):
-        return False
-    required = max(1, int(screening.get("early_stop_consecutive", 1)))
-    return consecutive_near_zero >= required
-
-
-def _load_filterwise_checkpoint(output_dir: Path, config_path: Path, rows: list[Metrics]) -> list[Metrics]:
-    """Merge completed rows from a prior filter-wise run into the current plan."""
-
-    manifest_path = output_dir / "manifest.json"
-    if not manifest_path.exists():
-        return rows
-    try:
-        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return rows
-
-    planned_ids = [str(row["candidate_id"]) for row in rows]
-    if manifest.get("candidate_ids") != planned_ids:
-        return rows
-    saved_config = manifest.get("config_path")
-    if saved_config and Path(saved_config).resolve() != Path(config_path).resolve():
-        return rows
-
-    saved_rows = {
-        str(row.get("candidate_id")): row
-        for row in manifest.get("rows", [])
-        if isinstance(row, dict)
-    }
-    for row in rows:
-        saved = saved_rows.get(str(row["candidate_id"]))
-        if saved is not None:
-            saved = dict(saved)
-            if saved.get("stage") == "filterwise" and saved.get("status") == "failed" and _is_filterwise_channel_mismatch(saved.get("error")):
-                saved["status"] = "skipped"
-                saved["reason"] = "Skipped because structural channel mismatch: " + str(saved.get("error"))
-            if _row_is_recorded(saved) or saved.get("status") == "failed":
-                row.clear()
-                row.update(saved)
-    return rows
-
-
-def _row_is_terminal_exclusion(row: Mapping[str, Any]) -> bool:
-    """Return whether a saved row was intentionally excluded from evaluation."""
-
-    return row.get("status") in _TERMINAL_FILTERWISE_STATUSES
-
-
-def _is_filterwise_channel_mismatch(error: str | None) -> bool:
-    """Return whether an error describes an invalid propagated channel topology."""
-
-    return bool(error and _FILTERWISE_CHANNEL_MISMATCH_RE.search(str(error)))
-
-
-def _filterwise_step(model: Any, layer: str, config: Mapping[str, Any]) -> Any:
-    """Remove exactly one lowest-Minimum-Weight filter from the current model."""
-
-    import torch
-    from torch import nn
-
-    from infrared_detection.compression.pruning import compute_channel_importance
-    from infrared_detection.compression.pruning.cluster_probe import run_filterwise_probe as prune
-
-    unwrapped = _unwrap_model(model)
-    module = dict(unwrapped.named_modules()).get(layer)
-    if not isinstance(module, nn.Conv2d):
-        raise ValueError(f"Filter-wise step target {layer!r} is not a prunable Conv2d module.")
-    if int(module.weight.shape[0]) <= 1:
-        raise ValueError(f"Filter-wise step for {layer!r} cannot remove the final output filter.")
-    scores = compute_channel_importance(unwrapped)
-    if layer not in scores:
-        raise ValueError(f"No channel-importance scores are available for prunable layer {layer!r}.")
-    prune_index = (int(torch.argsort(scores[layer])[0]),)
-    image_size = int(config["experiment"]["image_size"])
-    aligned_image_size = ((image_size + 31) // 32) * 32
-    pruned = prune(
-        unwrapped,
-        torch.zeros(1, 3, aligned_image_size, aligned_image_size),
-        layer,
-        prune_index,
-    )
-    if hasattr(model, "model"):
-        model.model = pruned
-        return model
-    return pruned
-
-
-def _save_filterwise_checkpoint(model: Any, output_dir: Path) -> Path:
-    output_dir.mkdir(parents=True, exist_ok=True)
-    checkpoint = output_dir / "candidate.pt"
-    save = getattr(model, "save", None)
-    if not callable(save):
-        raise RuntimeError("Sequential filter-wise pruning requires a save-capable model wrapper.")
-    save(checkpoint)
-    if not checkpoint.exists():
-        raise FileNotFoundError(f"Pruned checkpoint was not written: {checkpoint}")
-    return checkpoint
 
 
 def _structural_global(model: Any, cluster_size: int, ratio: float, config: Mapping[str, Any]) -> Any:
