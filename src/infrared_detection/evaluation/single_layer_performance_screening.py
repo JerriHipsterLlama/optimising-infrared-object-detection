@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from fnmatch import fnmatchcase
 import hashlib
+import importlib
 import json
 from pathlib import Path
 import re
@@ -16,6 +17,25 @@ import yaml
 
 from infrared_detection.compression.pruning import rank_filters_by_minimum_weight
 from infrared_detection.evaluation.artifacts import write_metrics_csv
+
+
+_PRODUCTION_DEPENDENCY_MODULES = {
+    "run_filterwise_probe": "infrared_detection.compression.pruning.cluster_probe",
+    "benchmark_pytorch_cuda_forward": "infrared_detection.benchmarking.pytorch_cuda",
+    "collect_model_stats": "infrared_detection.evaluation.model_stats",
+}
+
+
+def _production_dependency(name: str):
+    existing = globals().get(name)
+    if existing is not None:
+        return existing
+    module_name = _PRODUCTION_DEPENDENCY_MODULES.get(name)
+    if module_name is None:
+        raise RuntimeError(f"Required production helper {name!r} is unavailable")
+    candidate = getattr(importlib.import_module(module_name), name)
+    globals()[name] = candidate
+    return candidate
 
 
 @dataclass(frozen=True)
@@ -46,29 +66,11 @@ class ScreeningAdapters:
     @classmethod
     def defaults(cls, config: dict) -> "ScreeningAdapters":
         """Build the real YOLO/CUDA adapters without importing optional services at module import time."""
-        import importlib
-
         import torch
 
         configured_device = str(config.get("runtime", {}).get("device", "0"))
         if configured_device in {"0", "cuda", "cuda:0"} and not torch.cuda.is_available():
             raise RuntimeError("CUDA is unavailable; single-layer performance screening requires CUDA")
-
-        def dependency(name: str):
-            existing = globals().get(name)
-            if existing is not None:
-                return existing
-            for module_name in (
-                "infrared_detection.optimisations.fcpts_yolo",
-                "infrared_detection.evaluation.model_stats",
-            ):
-                try:
-                    candidate = getattr(importlib.import_module(module_name), name)
-                except (ImportError, AttributeError):
-                    continue
-                globals()[name] = candidate
-                return candidate
-            raise RuntimeError(f"Required production helper {name!r} is unavailable")
 
         def cuda_device(settings: dict) -> str:
             device = str(settings["runtime"].get("device", "0"))
@@ -103,7 +105,10 @@ class ScreeningAdapters:
 
         def prune_filter(wrapper, layer: str, physical_filter_index: int, settings: dict):
             example_input = torch.randn(1, 3, settings["experiment"]["image_size"], settings["experiment"]["image_size"])
-            return dependency("run_filterwise_probe")(unwrap(wrapper), example_input, layer, (physical_filter_index,))
+            wrapper.model = _production_dependency("run_filterwise_probe")(
+                unwrap(wrapper), example_input, layer, (physical_filter_index,)
+            )
+            return wrapper
 
         def profile(wrapper, settings: dict) -> dict:
             device = cuda_device(settings)
@@ -115,7 +120,7 @@ class ScreeningAdapters:
             example_input = example_input.to(device)
             if precision == "fp16":
                 example_input = example_input.half()
-            return dependency("benchmark_pytorch_cuda_forward")(
+            return _production_dependency("benchmark_pytorch_cuda_forward")(
                 model, example_input, warmup=settings["screening"]["warmup"], iterations=settings["screening"]["iterations"],
             )
 
@@ -124,7 +129,7 @@ class ScreeningAdapters:
             evaluate=evaluate,
             prune_filter=prune_filter,
             profile=profile,
-            stats=lambda wrapper: dependency("collect_model_stats")(unwrap(wrapper)),
+            stats=lambda wrapper: _production_dependency("collect_model_stats")(unwrap(wrapper)),
             save_checkpoint=lambda wrapper, path: wrapper.save(path),
         )
     """Injectable model operations used by the screening workflow."""
@@ -447,7 +452,8 @@ def run_single_layer_performance_screening(
     model_variant = str(experiment["model_variant"])
     hardware = str(experiment["hardware_label"])
 
-    planning_model = adapters.load_model(checkpoint)
+    planning_wrapper = adapters.load_model(checkpoint)
+    planning_model = getattr(planning_wrapper, "model", planning_wrapper)
     layers = resolve_layer_patterns(planning_model, config["screening"]["layer_patterns"])
     layer_plans = [build_layer_plan(planning_model, layer) for layer in layers]
     rows, _saved_rankings, state = load_screening_artifacts(output_dir, fingerprint)
@@ -462,11 +468,11 @@ def run_single_layer_performance_screening(
 
     baseline_row = rows_by_id.get("baseline")
     if baseline_row is None:
-        baseline_accuracy = dict(adapters.evaluate(planning_model, config))
-        baseline_latency = dict(adapters.profile(planning_model, config))
+        baseline_accuracy = dict(adapters.evaluate(planning_wrapper, config))
+        baseline_latency = dict(adapters.profile(planning_wrapper, config))
         baseline_row = {
             "candidate_id": "baseline", "stage": "baseline", "status": "completed", "model_variant": model_variant,
-            "hardware": hardware, **baseline_accuracy, **baseline_latency, **dict(adapters.stats(planning_model)),
+            "hardware": hardware, **baseline_accuracy, **baseline_latency, **dict(adapters.stats(planning_wrapper)),
         }
         rows_by_id["baseline"] = baseline_row
         write_screening_artifacts(output_dir, path, list(rows_by_id.values()), rankings, state)

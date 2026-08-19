@@ -311,6 +311,42 @@ def test_complete_curve_records_k_minus_one_candidates_and_translated_physical_i
     assert not (tmp_path / "artifacts" / "resume.pt").exists()
 
 
+def test_planning_resolves_configured_paths_against_a_wrapped_model(tmp_path):
+    config_path = _screening_config(tmp_path, ["layer_a"])
+
+    class Wrapper(nn.Module):
+        def __init__(self, inner: ScreeningModel | None = None) -> None:
+            super().__init__()
+            self.model = inner or ScreeningModel()
+
+    def load_model(path: str | Path) -> Wrapper:
+        checkpoint = Path(path)
+        history = () if checkpoint.name == "dense.pt" else tuple(
+            tuple(item) for item in json.loads(checkpoint.read_text(encoding="utf-8"))
+        )
+        return Wrapper(ScreeningModel(history))
+
+    def prune_filter(wrapper: Wrapper, layer: str, physical_index: int, config: dict) -> Wrapper:
+        pruned = copy.deepcopy(wrapper)
+        pruned.model.history = (*wrapper.model.history, (layer, physical_index))
+        return pruned
+
+    adapters = ScreeningAdapters(
+        load_model=load_model,
+        evaluate=lambda wrapper, config: {"map50_95": 0.5},
+        prune_filter=prune_filter,
+        profile=lambda wrapper, config: {"latency_p50_ms": 9.0},
+        stats=lambda wrapper: {},
+        save_checkpoint=lambda wrapper, path: Path(path).write_text(
+            json.dumps(wrapper.model.history), encoding="utf-8"
+        ),
+    )
+
+    rows = run_single_layer_performance_screening(config_path, adapters=adapters)
+
+    assert [row["status"] for row in rows if row.get("stage") == "single_layer"] == ["completed"] * 3
+
+
 def test_independent_layers_each_start_from_the_dense_checkpoint(tmp_path):
     config_path = _screening_config(tmp_path, ["layer_a", "layer_b"])
     adapters, loads, _evaluations, prunes = _screening_adapters()
@@ -571,8 +607,21 @@ def test_production_adapters_evaluate_with_yolo_validation_arguments_and_normali
     assert stats_calls == [wrapper.model]
 
 
+def test_production_dependencies_resolve_from_their_authoritative_modules():
+    assert screening_module._production_dependency("run_filterwise_probe").__module__ == (
+        "infrared_detection.compression.pruning.cluster_probe"
+    )
+    assert screening_module._production_dependency("benchmark_pytorch_cuda_forward").__module__ == (
+        "infrared_detection.benchmarking.pytorch_cuda"
+    )
+    assert screening_module._production_dependency("collect_model_stats").__module__ == (
+        "infrared_detection.evaluation.model_stats"
+    )
+
+
 def test_production_adapters_prune_one_physical_index_with_a_352_pixel_example_input(monkeypatch):
     wrapper = _ProductionWrapper(nn.Conv2d(3, 4, 1))
+    original_model = wrapper.model
     probe_calls: list[tuple[nn.Module, torch.Tensor, str, tuple[int, ...]]] = []
 
     def fake_probe(model, example_input, layer, physical_indices):
@@ -584,7 +633,8 @@ def test_production_adapters_prune_one_physical_index_with_a_352_pixel_example_i
 
     pruned = adapters.prune_filter(wrapper, "model.6.m.0.cv1.conv", 17, _production_config())
 
-    assert pruned is wrapper.model
+    assert pruned is wrapper
+    assert pruned.model is original_model
     model, example_input, layer, physical_indices = probe_calls[0]
     assert model is wrapper.model
     assert tuple(example_input.shape) == (1, 3, 352, 352)
