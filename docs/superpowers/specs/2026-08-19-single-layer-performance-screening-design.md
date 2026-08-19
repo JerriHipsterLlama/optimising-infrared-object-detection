@@ -176,7 +176,7 @@ For the active layer only, it stores:
 
 The fixed ranking is stored separately in `rankings.json`. Completed measurements are stored in `results.csv` and `manifest.json`.
 
-After a candidate is measured, the workflow writes the checkpoint and structured state through temporary paths followed by atomic replacement. Result rows are keyed by deterministic candidate IDs, so rerunning a step replaces the same logical row instead of duplicating it.
+Before evaluation, the newly pruned model is saved as `resume.pending.pt` so validation can load an isolated copy. The previous `resume.pt` remains untouched until accuracy and latency both succeed. A successful candidate atomically promotes `resume.pending.pt` to `resume.pt`, then writes the completed result and advanced state. A failed measurement deletes the pending file and leaves the previous valid resume checkpoint and state unchanged. Result rows are keyed by deterministic candidate IDs, so retrying a step replaces the same logical row instead of duplicating it.
 
 After a layer completes, its transient checkpoint is deleted. The next layer starts from the dense checkpoint. Storage therefore remains approximately the size of the dense checkpoint plus one active pruned checkpoint and small metadata files.
 
@@ -271,7 +271,7 @@ The implementation does not delete historical run data or historical design/plan
 The sole command interface is:
 
 ```powershell
-.venv\Scripts\python.exe apps\single_layer_performance_screening.py --config <config-path>
+.venv\Scripts\python.exe apps\single_layer_performance_screening.py --config configs\experiments\single_layer_performance_yolov8n_rtx.yaml
 ```
 
 Complete curves are mandatory; there is no `--full-curve` switch and no accuracy early-stop option. The command prints the model variant, hardware label, selected layer count, total planned candidates, active layer, current filter rank, filters remaining, latest `map50_95`, and latest latency after each candidate.
