@@ -632,6 +632,18 @@ def test_production_dependencies_resolve_from_their_authoritative_modules():
     )
 
 
+def test_linux_checkpoint_compatibility_maps_windows_path_pickles(monkeypatch):
+    import pathlib
+
+    monkeypatch.setattr(screening_module.sys, "platform", "linux")
+    monkeypatch.delitem(screening_module.sys.modules, "pathlib._local", raising=False)
+
+    screening_module._install_legacy_pathlib_checkpoint_compatibility()
+
+    legacy_module = screening_module.sys.modules["pathlib._local"]
+    assert legacy_module.WindowsPath is pathlib.PosixPath
+
+
 def test_production_adapters_prune_one_physical_index_with_a_352_pixel_example_input(monkeypatch):
     wrapper = _ProductionWrapper(nn.Conv2d(3, 4, 1))
     original_model = wrapper.model

@@ -9,6 +9,8 @@ import importlib
 import json
 from pathlib import Path
 import re
+import sys
+import types
 from typing import Any, Callable, Iterable, Mapping, Sequence
 
 import torch
@@ -36,6 +38,19 @@ def _production_dependency(name: str):
     candidate = getattr(importlib.import_module(module_name), name)
     globals()[name] = candidate
     return candidate
+
+
+def _install_legacy_pathlib_checkpoint_compatibility() -> None:
+    """Allow Linux to unpickle Windows-trained checkpoints containing pathlib._local paths."""
+
+    if sys.platform == "win32" or "pathlib._local" in sys.modules:
+        return
+    import pathlib
+
+    legacy_module = types.ModuleType("pathlib._local")
+    legacy_module.WindowsPath = pathlib.PosixPath
+    legacy_module.PosixPath = pathlib.PosixPath
+    sys.modules["pathlib._local"] = legacy_module
 
 
 @dataclass(frozen=True)
@@ -82,6 +97,7 @@ class ScreeningAdapters:
             return getattr(wrapper, "model", wrapper)
 
         def load_model(checkpoint):
+            _install_legacy_pathlib_checkpoint_compatibility()
             from ultralytics import YOLO
 
             cuda_device(config)
