@@ -167,15 +167,20 @@ def load_screening_artifacts(
     return rows, dict(rankings), state
 
 
-def save_pending_checkpoint(model: Any, output_dir: str | Path) -> Path:
+def save_pending_checkpoint(
+    model: Any, output_dir: str | Path, save_checkpoint: Callable[[Any, str | Path], None] | None = None
+) -> Path:
     """Save a candidate checkpoint without disturbing the last valid resume point."""
 
     pending_path = Path(output_dir) / "resume.pending.pt"
     pending_path.parent.mkdir(parents=True, exist_ok=True)
-    save = getattr(model, "save", None)
+    save = save_checkpoint if save_checkpoint is not None else getattr(model, "save", None)
     if not callable(save):
-        raise RuntimeError("Resume checkpoint requires a save-capable model.")
-    save(pending_path)
+        raise RuntimeError("Resume checkpoint requires a save-capable model or checkpoint adapter.")
+    if save_checkpoint is None:
+        save(pending_path)
+    else:
+        save(model, pending_path)
     if not pending_path.is_file() or pending_path.stat().st_size == 0:
         raise RuntimeError("Pending resume checkpoint was not written or is empty.")
     return pending_path
@@ -333,7 +338,9 @@ def _measurement_row(plan: LayerPlan, entry: FilterRanking, rank: int, model_var
 
 def _is_structural_error(error: BaseException) -> bool:
     message = str(error).lower()
-    return "dependency" in message or bool(re.search(r"channel(?:s)?\s+(?:mismatch|mis-match)", message))
+    return bool(re.search(r"dependency[- ]graph.*\breject", message)) or bool(
+        re.search(r"channel(?:s)?\s+(?:mismatch|mis-match)", message)
+    )
 
 
 def _discard_pending_checkpoint(output_dir: Path) -> None:
@@ -407,10 +414,17 @@ def run_single_layer_performance_screening(
             physical = physical_index(remaining, entry.original_index)
             try:
                 working_model = adapters.prune_filter(working_model, plan.name, physical, config)
-                save_pending_checkpoint(working_model, output_dir)
+                save_pending_checkpoint(working_model, output_dir, adapters.save_checkpoint)
                 evaluation_model = adapters.load_model(output_dir / "resume.pending.pt")
                 accuracy = adapters.evaluate(evaluation_model, config)
                 latency = adapters.profile(working_model, config)
+                next_remaining = list(remaining)
+                next_remaining.remove(entry.original_index)
+                completed = complete_candidate_row(
+                    layer_plan=plan, ranking_entry=entry, filter_rank=rank, physical_filter_index=physical,
+                    remaining_original_indices=next_remaining, accuracy=accuracy, latency=latency, baseline=baseline_row,
+                    stats=adapters.stats(working_model),
+                )
             except BaseException as error:
                 _discard_pending_checkpoint(output_dir)
                 if _is_structural_error(error):
@@ -431,13 +445,8 @@ def run_single_layer_performance_screening(
                 if on_result:
                     on_result(failed)
                 raise
-            remaining.remove(entry.original_index)
+            remaining = next_remaining
             promote_pending_checkpoint(output_dir)
-            completed = complete_candidate_row(
-                layer_plan=plan, ranking_entry=entry, filter_rank=rank, physical_filter_index=physical,
-                remaining_original_indices=remaining, accuracy=accuracy, latency=latency, baseline=baseline_row,
-                stats=adapters.stats(working_model),
-            )
             rows_by_id[completed["candidate_id"]] = completed
             state = ResumeState(1, fingerprint, plan.name, rank + 1, tuple(remaining), completed["candidate_id"])
             write_screening_artifacts(output_dir, path, list(rows_by_id.values()), rankings, state)

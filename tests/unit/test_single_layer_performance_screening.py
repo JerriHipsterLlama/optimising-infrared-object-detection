@@ -254,7 +254,7 @@ def _screening_config(tmp_path: Path, layers: list[str]) -> Path:
     return config_path
 
 
-def _screening_adapters(*, profile=None, prune=None):
+def _screening_adapters(*, profile=None, prune=None, stats=None):
     loads: list[tuple[Path, tuple[tuple[str, int], ...]]] = []
     evaluations: list[tuple[tuple[str, int], ...]] = []
     prunes: list[tuple[str, int, tuple[tuple[str, int], ...]]] = []
@@ -288,7 +288,7 @@ def _screening_adapters(*, profile=None, prune=None):
         evaluate=evaluate,
         prune_filter=prune_filter,
         profile=profile_model,
-        stats=lambda model: {},
+        stats=lambda model: {} if stats is None else stats(model),
         save_checkpoint=lambda model, path: model.save(path),
     )
     return adapters, loads, evaluations, prunes
@@ -398,6 +398,85 @@ def test_failed_measurement_removes_only_pending_checkpoint_and_preserves_prior_
     output_dir = tmp_path / "artifacts"
     assert not (output_dir / "resume.pending.pt").exists()
     assert json.loads((output_dir / "resume.pt").read_text(encoding="utf-8")) == [["layer_a", 2]]
+
+
+def test_stats_failure_preserves_previous_resume_and_marks_the_rank_retryable(tmp_path):
+    config_path = _screening_config(tmp_path, ["layer_a"])
+
+    def fail_second_rank_stats(model):
+        if model.history == (("layer_a", 2), ("layer_a", 0)):
+            raise RuntimeError("stats failed")
+        return {}
+
+    adapters, _loads, _evaluations, _prunes = _screening_adapters(stats=fail_second_rank_stats)
+    with pytest.raises(RuntimeError, match="stats failed"):
+        run_single_layer_performance_screening(config_path, adapters=adapters)
+
+    output_dir = tmp_path / "artifacts"
+    rows, _rankings, state = load_screening_artifacts(output_dir, _artifact_fingerprint(config_path))
+    candidates = [row for row in rows if row.get("stage") == "single_layer"]
+    assert [row["status"] for row in candidates] == ["completed", "failed", "planned"]
+    assert state is not None and state.next_filter_rank == 2
+    assert json.loads((output_dir / "resume.pt").read_text(encoding="utf-8")) == [["layer_a", 2]]
+    assert not (output_dir / "resume.pending.pt").exists()
+
+
+def test_dependency_service_error_is_failed_retryable_and_rethrown_not_structural(tmp_path):
+    config_path = _screening_config(tmp_path, ["layer_a"])
+
+    def fail_with_transient_dependency_error(layer, physical_index, model):
+        raise RuntimeError("dependency service unavailable")
+
+    adapters, _loads, _evaluations, _prunes = _screening_adapters(prune=fail_with_transient_dependency_error)
+    with pytest.raises(RuntimeError, match="dependency service unavailable"):
+        run_single_layer_performance_screening(config_path, adapters=adapters)
+
+    rows, _rankings, state = load_screening_artifacts(tmp_path / "artifacts", _artifact_fingerprint(config_path))
+    candidates = [row for row in rows if row.get("stage") == "single_layer"]
+    assert [row["status"] for row in candidates] == ["failed", "planned", "planned"]
+    assert state is not None and state.next_filter_rank == 1
+
+
+class NoSaveScreeningModel(nn.Module):
+    def __init__(self, history: tuple[tuple[str, int], ...] = ()) -> None:
+        super().__init__()
+        self.layer_a = nn.Conv2d(1, 4, 1, bias=False)
+        with torch.no_grad():
+            self.layer_a.weight[:, 0, 0, 0] = torch.tensor([2.0, 4.0, 1.0, 3.0])
+        self.history = history
+
+
+def test_checkpoint_adapter_saves_pending_checkpoint_when_working_model_has_no_save(tmp_path):
+    config_path = _screening_config(tmp_path, ["layer_a"])
+    saved_paths: list[Path] = []
+
+    def load_model(path: str | Path) -> NoSaveScreeningModel:
+        checkpoint = Path(path)
+        history = () if checkpoint.name == "dense.pt" else tuple(tuple(item) for item in json.loads(checkpoint.read_text(encoding="utf-8")))
+        return NoSaveScreeningModel(history)
+
+    def prune_filter(model, layer, physical_index, config):
+        pruned = copy.deepcopy(model)
+        pruned.history = (*model.history, (layer, physical_index))
+        return pruned
+
+    def save_checkpoint(model, path):
+        target = Path(path)
+        saved_paths.append(target)
+        target.write_text(json.dumps(model.history), encoding="utf-8")
+
+    adapters = ScreeningAdapters(
+        load_model=load_model,
+        evaluate=lambda model, config: {"map50_95": 0.5},
+        prune_filter=prune_filter,
+        profile=lambda model, config: {"latency_mean_ms": 10.0},
+        stats=lambda model: {},
+        save_checkpoint=save_checkpoint,
+    )
+
+    run_single_layer_performance_screening(config_path, adapters=adapters)
+
+    assert saved_paths == [tmp_path / "artifacts" / "resume.pending.pt"] * 3
 
 
 def _artifact_fingerprint(config_path: Path) -> str:
