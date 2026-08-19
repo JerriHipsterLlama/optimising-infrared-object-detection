@@ -153,6 +153,19 @@ def test_artifacts_write_ordered_csv_and_reject_mismatched_fingerprint(tmp_path)
         load_screening_artifacts(output_dir, "different-fingerprint")
 
 
+def test_relative_output_directory_is_resolved_from_the_invocation_directory(monkeypatch, tmp_path):
+    config_path = tmp_path / "configs" / "experiments" / "screening.yaml"
+    config_path.parent.mkdir(parents=True)
+    monkeypatch.chdir(tmp_path)
+
+    output = screening_module._output_dir(
+        config_path,
+        {"experiment": {"output_dir": "runs/experiments/single_layer/yolov8n/rtx3070"}},
+    )
+
+    assert output == tmp_path / "runs" / "experiments" / "single_layer" / "yolov8n" / "rtx3070"
+
+
 def test_experiment_fingerprint_uses_canonical_config_and_input_file_metadata(tmp_path):
     checkpoint = tmp_path / "model.pt"
     dataset = tmp_path / "dataset.yaml"

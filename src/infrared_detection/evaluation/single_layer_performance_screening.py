@@ -421,7 +421,7 @@ def _load_config(config_path: str | Path) -> tuple[Path, dict[str, Any]]:
 
 def _output_dir(config_path: Path, config: Mapping[str, Any]) -> Path:
     configured = Path(config["experiment"]["output_dir"])
-    return configured if configured.is_absolute() else config_path.parent / configured
+    return configured if configured.is_absolute() else Path.cwd() / configured
 
 
 def _measurement_row(plan: LayerPlan, entry: FilterRanking, rank: int, model_variant: str, hardware: str, status: str, error: BaseException | None = None) -> dict[str, Any]:
