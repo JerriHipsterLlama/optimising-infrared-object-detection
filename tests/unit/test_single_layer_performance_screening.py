@@ -642,6 +642,25 @@ def test_production_adapters_prune_one_physical_index_with_a_352_pixel_example_i
     assert physical_indices == (17,)
 
 
+def test_production_pruning_trace_matches_the_current_model_device_and_dtype(monkeypatch):
+    model = nn.Conv2d(3, 4, 1, device="meta", dtype=torch.float64)
+    wrapper = _ProductionWrapper(model)
+    trace_inputs: list[torch.Tensor] = []
+
+    def fake_probe(pruned_model, example_input, layer, physical_indices):
+        trace_inputs.append(example_input)
+        return pruned_model
+
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(screening_module, "run_filterwise_probe", fake_probe, raising=False)
+    adapters = ScreeningAdapters.defaults(_production_config())
+
+    adapters.prune_filter(wrapper, "model.6.m.0.cv1.conv", 17, _production_config())
+
+    assert trace_inputs[0].device == model.weight.device
+    assert trace_inputs[0].dtype == model.weight.dtype
+
+
 def test_production_adapters_profile_on_configured_cuda_device_in_requested_precision(monkeypatch):
     model = _ProfileModel()
     wrapper = _ProductionWrapper(model)

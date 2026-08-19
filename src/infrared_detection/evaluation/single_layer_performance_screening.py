@@ -104,9 +104,18 @@ class ScreeningAdapters:
             }
 
         def prune_filter(wrapper, layer: str, physical_filter_index: int, settings: dict):
-            example_input = torch.randn(1, 3, settings["experiment"]["image_size"], settings["experiment"]["image_size"])
+            model = unwrap(wrapper)
+            reference_parameter = next(model.parameters())
+            example_input = torch.randn(
+                1,
+                3,
+                settings["experiment"]["image_size"],
+                settings["experiment"]["image_size"],
+                device=reference_parameter.device,
+                dtype=reference_parameter.dtype,
+            )
             wrapper.model = _production_dependency("run_filterwise_probe")(
-                unwrap(wrapper), example_input, layer, (physical_filter_index,)
+                model, example_input, layer, (physical_filter_index,)
             )
             return wrapper
 
