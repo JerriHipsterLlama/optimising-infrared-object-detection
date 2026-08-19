@@ -8,9 +8,11 @@ import hashlib
 import json
 from pathlib import Path
 import re
-from typing import Any, Iterable, Mapping, Sequence
+from typing import Any, Callable, Iterable, Mapping, Sequence
 
+import torch
 from torch import nn
+import yaml
 
 from infrared_detection.compression.pruning import rank_filters_by_minimum_weight
 from infrared_detection.evaluation.artifacts import write_metrics_csv
@@ -37,6 +39,18 @@ class ResumeState:
     next_filter_rank: int
     remaining_original_indices: tuple[int, ...]
     last_candidate_id: str | None
+
+
+@dataclass(frozen=True)
+class ScreeningAdapters:
+    """Injectable model operations used by the screening workflow."""
+
+    load_model: Callable[[str | Path], Any]
+    evaluate: Callable[[Any, Mapping[str, Any]], Mapping[str, Any]]
+    prune_filter: Callable[[Any, str, int, Mapping[str, Any]], Any]
+    profile: Callable[[Any, Mapping[str, Any]], Mapping[str, Any]]
+    stats: Callable[[Any], Mapping[str, Any]]
+    save_checkpoint: Callable[[Any, str | Path], None]
 
 
 _RESEARCH_FIELDS = (
@@ -249,3 +263,188 @@ def planned_rows(model_variant: str, hardware: str, layer_plans: Iterable[LayerP
             )
             rows.append(row)
     return rows
+
+
+def complete_candidate_row(
+    *,
+    layer_plan: LayerPlan,
+    ranking_entry: FilterRanking,
+    filter_rank: int,
+    physical_filter_index: int,
+    remaining_original_indices: Sequence[int],
+    accuracy: Mapping[str, Any],
+    latency: Mapping[str, Any],
+    baseline: Mapping[str, Any],
+    stats: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Build the completed research row for one measured pruning candidate."""
+
+    model_variant = str(baseline["model_variant"])
+    hardware = str(baseline["hardware"])
+    slug = re.sub(r"[^A-Za-z0-9]+", "-", layer_plan.name).strip("-")
+    row = {
+        field: None for field in _RESEARCH_FIELDS
+    }
+    row.update(
+        candidate_id=f"{model_variant}-{hardware}-{slug}-rank-{filter_rank}",
+        model_variant=model_variant,
+        hardware=hardware,
+        stage="single_layer",
+        status="completed",
+        layer=layer_plan.name,
+        filter_rank=filter_rank,
+        original_filter_index=ranking_entry.original_index,
+        physical_filter_index=physical_filter_index,
+        minimum_weight_score=ranking_entry.score,
+        filters_before=layer_plan.filters_before,
+        filters_removed=filter_rank,
+        filters_remaining=len(remaining_original_indices),
+        **dict(accuracy),
+        **dict(latency),
+        **dict(stats),
+    )
+    if row.get("map50_95") is not None and baseline.get("map50_95") is not None:
+        row["map50_95_drop"] = baseline["map50_95"] - row["map50_95"]
+    return row
+
+
+def _load_config(config_path: str | Path) -> tuple[Path, dict[str, Any]]:
+    path = Path(config_path)
+    config = yaml.safe_load(path.read_text(encoding="utf-8"))
+    if not isinstance(config, dict):
+        raise ValueError("Screening configuration must be a mapping.")
+    return path, config
+
+
+def _output_dir(config_path: Path, config: Mapping[str, Any]) -> Path:
+    configured = Path(config["experiment"]["output_dir"])
+    return configured if configured.is_absolute() else config_path.parent / configured
+
+
+def _measurement_row(plan: LayerPlan, entry: FilterRanking, rank: int, model_variant: str, hardware: str, status: str, error: BaseException | None = None) -> dict[str, Any]:
+    row = next(row for row in planned_rows(model_variant, hardware, [plan]) if row["filter_rank"] == rank)
+    row["stage"] = "single_layer"
+    row["status"] = status
+    if error is not None:
+        row["error"] = str(error)
+        row["reason"] = "structural" if _is_structural_error(error) else "measurement"
+    return row
+
+
+def _is_structural_error(error: BaseException) -> bool:
+    message = str(error).lower()
+    return "dependency" in message or bool(re.search(r"channel(?:s)?\s+(?:mismatch|mis-match)", message))
+
+
+def _discard_pending_checkpoint(output_dir: Path) -> None:
+    (output_dir / "resume.pending.pt").unlink(missing_ok=True)
+
+
+def run_single_layer_performance_screening(
+    config_path: str | Path, *, adapters: ScreeningAdapters | None = None, on_result: Callable[[dict[str, Any]], None] | None = None
+) -> list[dict[str, Any]]:
+    """Run an independent, complete K-1 pruning curve for each selected layer."""
+
+    if adapters is None:
+        raise RuntimeError("Screening adapters must be supplied until runtime adapters are implemented.")
+    path, config = _load_config(config_path)
+    output_dir = _output_dir(path, config)
+    checkpoint = Path(config["model"]["checkpoint"])
+    dataset = Path(config["data"]["dataset_yaml"])
+    fingerprint = experiment_fingerprint(config, checkpoint, dataset)
+    experiment = config["experiment"]
+    model_variant = str(experiment["model_variant"])
+    hardware = str(experiment["hardware_label"])
+
+    planning_model = adapters.load_model(checkpoint)
+    layers = resolve_layer_patterns(planning_model, config["screening"]["layer_patterns"])
+    layer_plans = [build_layer_plan(planning_model, layer) for layer in layers]
+    rows, _saved_rankings, state = load_screening_artifacts(output_dir, fingerprint)
+    rows_by_id = {str(row["candidate_id"]): dict(row) for row in rows}
+    rankings = {
+        plan.name: [{"original_index": entry.original_index, "score": entry.score} for entry in plan.ranking]
+        for plan in layer_plans
+    }
+    for planned in planned_rows(model_variant, hardware, layer_plans):
+        planned["stage"] = "single_layer"
+        rows_by_id.setdefault(planned["candidate_id"], planned)
+
+    baseline_row = rows_by_id.get("baseline")
+    if baseline_row is None:
+        baseline_accuracy = dict(adapters.evaluate(planning_model, config))
+        baseline_latency = dict(adapters.profile(planning_model, config))
+        baseline_row = {
+            "candidate_id": "baseline", "stage": "baseline", "status": "completed", "model_variant": model_variant,
+            "hardware": hardware, **baseline_accuracy, **baseline_latency, **dict(adapters.stats(planning_model)),
+        }
+        rows_by_id["baseline"] = baseline_row
+        write_screening_artifacts(output_dir, path, list(rows_by_id.values()), rankings, state)
+        if on_result:
+            on_result(baseline_row)
+
+    for plan in layer_plans:
+        if state is not None and state.active_layer != plan.name:
+            continue
+        resuming = state is not None and state.active_layer == plan.name
+        if resuming:
+            remaining = list(state.remaining_original_indices)
+            next_rank = state.next_filter_rank
+            if next_rank == 1:
+                working_model = adapters.load_model(checkpoint)
+            else:
+                resume_checkpoint = output_dir / "resume.pt"
+                if not resume_checkpoint.is_file():
+                    raise FileNotFoundError(f"Resume checkpoint is required for rank {next_rank}: {resume_checkpoint}")
+                working_model = adapters.load_model(resume_checkpoint)
+        else:
+            working_model = adapters.load_model(checkpoint)
+            remaining = list(range(plan.filters_before))
+            next_rank = 1
+
+        for rank, entry in enumerate(plan.ranking[:-1], start=1):
+            if rank < next_rank:
+                continue
+            physical = physical_index(remaining, entry.original_index)
+            try:
+                working_model = adapters.prune_filter(working_model, plan.name, physical, config)
+                save_pending_checkpoint(working_model, output_dir)
+                evaluation_model = adapters.load_model(output_dir / "resume.pending.pt")
+                accuracy = adapters.evaluate(evaluation_model, config)
+                latency = adapters.profile(working_model, config)
+            except BaseException as error:
+                _discard_pending_checkpoint(output_dir)
+                if _is_structural_error(error):
+                    for skipped_rank, skipped_entry in enumerate(plan.ranking[rank - 1:-1], start=rank):
+                        skipped = _measurement_row(plan, skipped_entry, skipped_rank, model_variant, hardware, "skipped", error)
+                        rows_by_id[skipped["candidate_id"]] = skipped
+                    write_screening_artifacts(output_dir, path, list(rows_by_id.values()), rankings, state)
+                    if on_result:
+                        for skipped_rank, skipped_entry in enumerate(plan.ranking[rank - 1:-1], start=rank):
+                            candidate_id = _measurement_row(plan, skipped_entry, skipped_rank, model_variant, hardware, "skipped")["candidate_id"]
+                            on_result(rows_by_id[candidate_id])
+                    break
+                failed = _measurement_row(plan, entry, rank, model_variant, hardware, "failed", error)
+                rows_by_id[failed["candidate_id"]] = failed
+                if state is None:
+                    state = ResumeState(1, fingerprint, plan.name, rank, tuple(remaining), None)
+                write_screening_artifacts(output_dir, path, list(rows_by_id.values()), rankings, state)
+                if on_result:
+                    on_result(failed)
+                raise
+            remaining.remove(entry.original_index)
+            promote_pending_checkpoint(output_dir)
+            completed = complete_candidate_row(
+                layer_plan=plan, ranking_entry=entry, filter_rank=rank, physical_filter_index=physical,
+                remaining_original_indices=remaining, accuracy=accuracy, latency=latency, baseline=baseline_row,
+                stats=adapters.stats(working_model),
+            )
+            rows_by_id[completed["candidate_id"]] = completed
+            state = ResumeState(1, fingerprint, plan.name, rank + 1, tuple(remaining), completed["candidate_id"])
+            write_screening_artifacts(output_dir, path, list(rows_by_id.values()), rankings, state)
+            if on_result:
+                on_result(completed)
+        clear_resume_checkpoint(output_dir)
+        state = None
+        write_screening_artifacts(output_dir, path, list(rows_by_id.values()), rankings, state)
+
+    return list(rows_by_id.values())

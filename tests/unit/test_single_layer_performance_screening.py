@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import csv
+import copy
 import json
 from pathlib import Path
 
@@ -12,6 +13,7 @@ from infrared_detection.evaluation.single_layer_performance_screening import (
     FilterRanking,
     LayerPlan,
     ResumeState,
+    ScreeningAdapters,
     build_layer_plan,
     experiment_fingerprint,
     load_screening_artifacts,
@@ -20,6 +22,7 @@ from infrared_detection.evaluation.single_layer_performance_screening import (
     promote_pending_checkpoint,
     resolve_layer_patterns,
     save_pending_checkpoint,
+    run_single_layer_performance_screening,
     write_screening_artifacts,
 )
 
@@ -217,3 +220,188 @@ def _screening_patterns() -> list[str]:
         "model.12.m.*.cv1.conv", "model.12.m.*.cv2.conv", "model.18.m.*.cv1.conv", "model.18.m.*.cv2.conv",
         "model.21.m.*.cv1.conv", "model.21.m.*.cv2.conv",
     ]
+
+
+class ScreeningModel(nn.Module):
+    def __init__(self, history: tuple[tuple[str, int], ...] = ()) -> None:
+        super().__init__()
+        self.layer_a = nn.Conv2d(1, 4, 1, bias=False)
+        self.layer_b = nn.Conv2d(1, 4, 1, bias=False)
+        with torch.no_grad():
+            for layer in (self.layer_a, self.layer_b):
+                layer.weight[:, 0, 0, 0] = torch.tensor([2.0, 4.0, 1.0, 3.0])
+        self.history = history
+
+    def save(self, path: str | Path) -> None:
+        Path(path).write_text(json.dumps(self.history), encoding="utf-8")
+
+
+def _screening_config(tmp_path: Path, layers: list[str]) -> Path:
+    checkpoint = tmp_path / "dense.pt"
+    dataset = tmp_path / "dataset.yaml"
+    checkpoint.write_bytes(b"dense")
+    dataset.write_text("path: data\n", encoding="utf-8")
+    config_path = tmp_path / "screening.yaml"
+    config_path.write_text(
+        "\n".join((
+            "model:", f"  checkpoint: {checkpoint}", "data:", f"  dataset_yaml: {dataset}",
+            "experiment:", "  model_variant: fake", "  hardware_label: cpu", "  image_size: 32",
+            f"  output_dir: {tmp_path / 'artifacts'}", "runtime:", "  precision: fp32", "screening:",
+            "  layer_patterns:", *(f"    - {layer}" for layer in layers), "",
+        )),
+        encoding="utf-8",
+    )
+    return config_path
+
+
+def _screening_adapters(*, profile=None, prune=None):
+    loads: list[tuple[Path, tuple[tuple[str, int], ...]]] = []
+    evaluations: list[tuple[tuple[str, int], ...]] = []
+    prunes: list[tuple[str, int, tuple[tuple[str, int], ...]]] = []
+
+    def load_model(path: str | Path) -> ScreeningModel:
+        checkpoint = Path(path)
+        history = () if checkpoint.name == "dense.pt" else tuple(tuple(item) for item in json.loads(checkpoint.read_text(encoding="utf-8")))
+        model = ScreeningModel(history)
+        loads.append((checkpoint, model.history))
+        return model
+
+    def prune_filter(model: ScreeningModel, layer: str, physical_index: int, config: dict) -> ScreeningModel:
+        prunes.append((layer, physical_index, model.history))
+        if prune is not None:
+            prune(layer, physical_index, model)
+        pruned = copy.deepcopy(model)
+        pruned.history = (*model.history, (layer, physical_index))
+        return pruned
+
+    def evaluate(model: ScreeningModel, config: dict) -> dict:
+        evaluations.append(model.history)
+        return {"map50_95": 0.5, "map50": 0.6, "precision": 0.7, "recall": 0.8}
+
+    def profile_model(model: ScreeningModel, config: dict) -> dict:
+        if profile is not None:
+            profile(model)
+        return {"latency_mean_ms": 10.0, "latency_p50_ms": 9.0, "latency_p95_ms": 12.0, "fps": 100.0}
+
+    adapters = ScreeningAdapters(
+        load_model=load_model,
+        evaluate=evaluate,
+        prune_filter=prune_filter,
+        profile=profile_model,
+        stats=lambda model: {},
+        save_checkpoint=lambda model, path: model.save(path),
+    )
+    return adapters, loads, evaluations, prunes
+
+
+def test_complete_curve_records_k_minus_one_candidates_and_translated_physical_indices(tmp_path):
+    config_path = _screening_config(tmp_path, ["layer_a"])
+    adapters, _loads, _evaluations, prunes = _screening_adapters()
+
+    rows = run_single_layer_performance_screening(config_path, adapters=adapters)
+
+    candidates = [row for row in rows if row["stage"] == "single_layer"]
+    assert [row["filter_rank"] for row in candidates] == [1, 2, 3]
+    assert [row["filters_remaining"] for row in candidates] == [3, 2, 1]
+    assert [row["status"] for row in candidates] == ["completed"] * 3
+    assert [physical for _layer, physical, _history in prunes] == [2, 0, 1]
+    assert not (tmp_path / "artifacts" / "resume.pt").exists()
+
+
+def test_independent_layers_each_start_from_the_dense_checkpoint(tmp_path):
+    config_path = _screening_config(tmp_path, ["layer_a", "layer_b"])
+    adapters, loads, _evaluations, prunes = _screening_adapters()
+
+    run_single_layer_performance_screening(config_path, adapters=adapters)
+
+    dense_loads = [history for checkpoint, history in loads if checkpoint.name == "dense.pt"]
+    assert dense_loads == [(), (), ()]
+    first_layer_b_prune = next(history for layer, _physical, history in prunes if layer == "layer_b")
+    assert first_layer_b_prune == ()
+
+
+def test_resume_does_not_reevaluate_completed_ranks(tmp_path):
+    config_path = _screening_config(tmp_path, ["layer_a"])
+    profile_calls = 0
+
+    def interrupt_after_rank_two(model):
+        nonlocal profile_calls
+        profile_calls += 1
+        if profile_calls == 4:  # baseline, ranks 1 and 2, then rank 3
+            raise RuntimeError("interrupted")
+
+    interrupted_adapters, _loads, first_evaluations, _prunes = _screening_adapters(profile=interrupt_after_rank_two)
+    with pytest.raises(RuntimeError, match="interrupted"):
+        run_single_layer_performance_screening(config_path, adapters=interrupted_adapters)
+
+    rows, _rankings, _state = load_screening_artifacts(tmp_path / "artifacts", _artifact_fingerprint(config_path))
+    assert [row["filter_rank"] for row in rows if row.get("stage") == "single_layer" and row.get("status") == "completed"] == [1, 2]
+    assert (tmp_path / "artifacts" / "resume.pt").exists()
+
+    resumed_adapters, _loads, resumed_evaluations, _prunes = _screening_adapters()
+    rows = run_single_layer_performance_screening(config_path, adapters=resumed_adapters)
+
+    assert len(first_evaluations) == 4  # baseline plus ranks 1, 2, and 3 before profiling interrupts
+    assert resumed_evaluations == [(('layer_a', 2), ('layer_a', 0), ('layer_a', 1))]
+    assert [row["filter_rank"] for row in rows if row.get("stage") == "single_layer" and row.get("status") == "completed"] == [1, 2, 3]
+
+
+def test_structural_failure_skips_the_rest_of_its_layer_and_continues_with_the_next(tmp_path):
+    config_path = _screening_config(tmp_path, ["layer_a", "layer_b"])
+
+    def reject_second_layer_a_prune(layer, physical_index, model):
+        if layer == "layer_a" and physical_index == 0:
+            raise RuntimeError("channel mismatch in dependency graph")
+
+    adapters, _loads, _evaluations, prunes = _screening_adapters(prune=reject_second_layer_a_prune)
+    rows = run_single_layer_performance_screening(config_path, adapters=adapters)
+
+    layer_a = [row for row in rows if row.get("layer") == "layer_a"]
+    assert [row["status"] for row in layer_a] == ["completed", "skipped", "skipped"]
+    assert all(row["status"] == "completed" for row in rows if row.get("layer") == "layer_b")
+    assert any(layer == "layer_b" for layer, _physical, _history in prunes)
+
+
+def test_out_of_memory_persists_failed_rank_stops_then_retries_it_on_resume(tmp_path):
+    config_path = _screening_config(tmp_path, ["layer_a"])
+
+    def out_of_memory(model):
+        if model.history == (("layer_a", 2),):
+            raise torch.OutOfMemoryError("CUDA out of memory")
+
+    failing_adapters, _loads, _evaluations, _prunes = _screening_adapters(profile=out_of_memory)
+    with pytest.raises(torch.OutOfMemoryError, match="out of memory"):
+        run_single_layer_performance_screening(config_path, adapters=failing_adapters)
+
+    rows, _rankings, state = load_screening_artifacts(tmp_path / "artifacts", _artifact_fingerprint(config_path))
+    candidates = [row for row in rows if row.get("stage") == "single_layer"]
+    assert [row["status"] for row in candidates] == ["failed", "planned", "planned"]
+    assert state is not None and state.next_filter_rank == 1
+
+    retry_adapters, _loads, retry_evaluations, _prunes = _screening_adapters()
+    rows = run_single_layer_performance_screening(config_path, adapters=retry_adapters)
+    assert retry_evaluations[0] == (("layer_a", 2),)
+    assert [row["status"] for row in rows if row.get("stage") == "single_layer"] == ["completed"] * 3
+
+
+def test_failed_measurement_removes_only_pending_checkpoint_and_preserves_prior_resume(tmp_path):
+    config_path = _screening_config(tmp_path, ["layer_a"])
+
+    def fail_rank_two_measurement(model):
+        if model.history == (("layer_a", 2), ("layer_a", 0)):
+            raise RuntimeError("measurement failed")
+
+    adapters, _loads, _evaluations, _prunes = _screening_adapters(profile=fail_rank_two_measurement)
+    with pytest.raises(RuntimeError, match="measurement failed"):
+        run_single_layer_performance_screening(config_path, adapters=adapters)
+
+    output_dir = tmp_path / "artifacts"
+    assert not (output_dir / "resume.pending.pt").exists()
+    assert json.loads((output_dir / "resume.pt").read_text(encoding="utf-8")) == [["layer_a", 2]]
+
+
+def _artifact_fingerprint(config_path: Path) -> str:
+    import yaml
+
+    config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    return experiment_fingerprint(config, config["model"]["checkpoint"], config["data"]["dataset_yaml"])
