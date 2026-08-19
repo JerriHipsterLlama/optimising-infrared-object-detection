@@ -29,7 +29,7 @@ def main() -> None:
     run_single_layer_performance_screening(
         args.config,
         adapters=ScreeningAdapters.defaults(config),
-        progress_callback=_progress,
+        on_result=_progress,
     )
 
 

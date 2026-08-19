@@ -1,5 +1,6 @@
 import subprocess
 import sys
+import importlib.util
 from pathlib import Path
 
 import yaml
@@ -51,6 +52,37 @@ def test_single_layer_performance_app_exposes_config_only():
     assert result.returncode == 0, result.stderr
     assert "--config" in result.stdout
     assert "--full-curve" not in result.stdout
+
+
+def test_single_layer_performance_app_passes_its_progress_function_as_on_result(monkeypatch, tmp_path):
+    app_path = Path(__file__).resolve().parents[2] / "apps" / "single_layer_performance_screening.py"
+    spec = importlib.util.spec_from_file_location("single_layer_performance_screening_app", app_path)
+    assert spec is not None and spec.loader is not None
+    app = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(app)
+    config_path = tmp_path / "screening.yaml"
+    config_path.write_text("runtime:\n  device: '0'\n", encoding="utf-8")
+    received: dict = {}
+
+    class FakeAdapters:
+        @staticmethod
+        def defaults(config):
+            return "adapters"
+
+    def fake_run(config_path, **kwargs):
+        received["config_path"] = config_path
+        received.update(kwargs)
+
+    monkeypatch.setattr(app, "ScreeningAdapters", FakeAdapters)
+    monkeypatch.setattr(app, "run_single_layer_performance_screening", fake_run)
+    monkeypatch.setattr(sys, "argv", [str(app_path), "--config", str(config_path)])
+
+    app.main()
+
+    assert received["config_path"] == str(config_path)
+    assert received["adapters"] == "adapters"
+    assert received["on_result"] is app._progress
+    assert "progress_callback" not in received
 
 
 def test_single_layer_performance_configs_have_approved_values_and_isolated_outputs():
