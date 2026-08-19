@@ -3,14 +3,14 @@
 # Image size: 336x256, Grayscale
 
 model:
-  name: "yolov8n"
+  name: "yolov8m"
   pretrained: true
   img_size: 336  # Native CAMEL image width (336x256 aspect ratio)
   device: 0  # GPU device index (0 for single GPU)
 
 training:
   epochs: 200  # Increased from 100 to 200 for thermal data convergence (Ding et al., 2024)
-  batch_size: 16  # Auto batch size based on GPU memory (Ultralytics default)
+  batch_size: 32  # Auto batch size based on GPU memory (Ultralytics default)
   learning_rate: 0.01  # Increased from 0.001 to 0.01 for thermal detection (Ding et al., 2024)
   momentum: 0.937  # SGD momentum (standard YOLOv8 default)
   weight_decay: 0.0005  # L2 regularization (standard YOLOv8 default)

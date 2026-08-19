@@ -13,7 +13,7 @@ experiment:
   output_dir: runs/experiments/single_layer_performance_screening/yolov8m/jetson_orin_nano
 runtime:
   device: "0"
-  precision: fp16
+  precision: fp32
   conf: 0.25
   iou: 0.6
 screening:
