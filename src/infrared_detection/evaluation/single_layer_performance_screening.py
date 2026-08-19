@@ -43,6 +43,90 @@ class ResumeState:
 
 @dataclass(frozen=True)
 class ScreeningAdapters:
+    @classmethod
+    def defaults(cls, config: dict) -> "ScreeningAdapters":
+        """Build the real YOLO/CUDA adapters without importing optional services at module import time."""
+        import importlib
+
+        import torch
+
+        configured_device = str(config.get("runtime", {}).get("device", "0"))
+        if configured_device in {"0", "cuda", "cuda:0"} and not torch.cuda.is_available():
+            raise RuntimeError("CUDA is unavailable; single-layer performance screening requires CUDA")
+
+        def dependency(name: str):
+            existing = globals().get(name)
+            if existing is not None:
+                return existing
+            for module_name in (
+                "infrared_detection.optimisations.fcpts_yolo",
+                "infrared_detection.evaluation.model_stats",
+            ):
+                try:
+                    candidate = getattr(importlib.import_module(module_name), name)
+                except (ImportError, AttributeError):
+                    continue
+                globals()[name] = candidate
+                return candidate
+            raise RuntimeError(f"Required production helper {name!r} is unavailable")
+
+        def cuda_device(settings: dict) -> str:
+            device = str(settings["runtime"].get("device", "0"))
+            if not torch.cuda.is_available():
+                raise RuntimeError("CUDA is unavailable; single-layer performance screening requires CUDA")
+            return device if device.startswith("cuda:") else f"cuda:{device}"
+
+        def unwrap(wrapper):
+            return getattr(wrapper, "model", wrapper)
+
+        def load_model(checkpoint):
+            from ultralytics import YOLO
+
+            cuda_device(config)
+            return YOLO(str(checkpoint))
+
+        def evaluate(wrapper, settings: dict) -> dict:
+            cuda_device(settings)
+            runtime = settings["runtime"]
+            experiment = settings["experiment"]
+            data = settings["data"]
+            result = wrapper.val(
+                data=data["dataset_yaml"], split=data.get("split", "val"), imgsz=experiment["image_size"],
+                device=runtime["device"], conf=runtime["conf"], iou=runtime["iou"],
+                batch=experiment.get("batch_size", 1), half=runtime.get("precision") == "fp16", verbose=False,
+            )
+            box = result.box
+            return {
+                "map50_95": float(box.map), "map50": float(box.map50),
+                "precision": float(box.mp), "recall": float(box.mr), "per_class_ap": list(box.maps),
+            }
+
+        def prune_filter(wrapper, layer: str, physical_filter_index: int, settings: dict):
+            example_input = torch.randn(1, 3, settings["experiment"]["image_size"], settings["experiment"]["image_size"])
+            return dependency("run_filterwise_probe")(unwrap(wrapper), example_input, layer, (physical_filter_index,))
+
+        def profile(wrapper, settings: dict) -> dict:
+            device = cuda_device(settings)
+            precision = settings["runtime"].get("precision", "fp32")
+            model = unwrap(wrapper).to(device)
+            if precision == "fp16":
+                model = model.half()
+            example_input = torch.randn(1, 3, settings["experiment"]["image_size"], settings["experiment"]["image_size"])
+            example_input = example_input.to(device)
+            if precision == "fp16":
+                example_input = example_input.half()
+            return dependency("benchmark_pytorch_cuda_forward")(
+                model, example_input, warmup=settings["screening"]["warmup"], iterations=settings["screening"]["iterations"],
+            )
+
+        return cls(
+            load_model=load_model,
+            evaluate=evaluate,
+            prune_filter=prune_filter,
+            profile=profile,
+            stats=lambda wrapper: dependency("collect_model_stats")(unwrap(wrapper)),
+            save_checkpoint=lambda wrapper, path: wrapper.save(path),
+        )
     """Injectable model operations used by the screening workflow."""
 
     load_model: Callable[[str | Path], Any]

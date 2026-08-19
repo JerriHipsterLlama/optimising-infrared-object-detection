@@ -1,0 +1,32 @@
+model:
+  checkpoint: models/checkpoints/yolov8/train4/weights/best.pt
+data:
+  dataset_yaml: data/camel/camel.yaml
+  split: val
+experiment:
+  model_variant: yolov8m
+  hardware_label: rtx3070
+  image_size: 352
+  num_classes: 4
+  seed: 7
+  batch_size: 1
+  output_dir: runs/experiments/single_layer_performance_screening/yolov8m/rtx3070
+runtime:
+  device: "0"
+  precision: fp16
+  conf: 0.25
+  iou: 0.6
+screening:
+  warmup: 20
+  iterations: 100
+  layer_patterns:
+    - model.6.m.*.cv1.conv
+    - model.6.m.*.cv2.conv
+    - model.8.m.*.cv1.conv
+    - model.8.m.*.cv2.conv
+    - model.12.m.*.cv1.conv
+    - model.12.m.*.cv2.conv
+    - model.18.m.*.cv1.conv
+    - model.18.m.*.cv2.conv
+    - model.21.m.*.cv1.conv
+    - model.21.m.*.cv2.conv

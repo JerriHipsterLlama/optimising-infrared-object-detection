@@ -3,6 +3,8 @@ from __future__ import annotations
 import csv
 import copy
 import json
+import sys
+import types
 from pathlib import Path
 
 import pytest
@@ -25,6 +27,7 @@ from infrared_detection.evaluation.single_layer_performance_screening import (
     run_single_layer_performance_screening,
     write_screening_artifacts,
 )
+import infrared_detection.evaluation.single_layer_performance_screening as screening_module
 
 
 class TinyModel(nn.Module):
@@ -484,3 +487,167 @@ def _artifact_fingerprint(config_path: Path) -> str:
 
     config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
     return experiment_fingerprint(config, config["model"]["checkpoint"], config["data"]["dataset_yaml"])
+
+
+class _ProductionWrapper:
+    def __init__(self, model: nn.Module) -> None:
+        self.model = model
+        self.val_calls: list[dict] = []
+
+    def val(self, **kwargs):
+        self.val_calls.append(kwargs)
+        return types.SimpleNamespace(
+            box=types.SimpleNamespace(
+                map=0.75408,
+                map50=0.901,
+                mp=0.812,
+                mr=0.723,
+                maps=[0.71, 0.72, 0.73, 0.74],
+            )
+        )
+
+    def save(self, path: str | Path) -> None:
+        Path(path).write_bytes(b"wrapped checkpoint")
+
+
+class _ProfileModel(nn.Module):
+    def __init__(self) -> None:
+        super().__init__()
+        self.layer = nn.Conv2d(3, 4, 1)
+        self.moves: list[object] = []
+        self.half_calls = 0
+
+    def to(self, *args, **kwargs):
+        self.moves.append(args[0] if args else kwargs.get("device"))
+        return self
+
+    def half(self):
+        self.half_calls += 1
+        return self
+
+
+def _production_config() -> dict:
+    return {
+        "model": {"checkpoint": "models/checkpoints/yolov8/train3/weights/best.pt"},
+        "data": {"dataset_yaml": "data/camel/camel.yaml", "split": "val"},
+        "experiment": {"image_size": 352, "batch_size": 1},
+        "runtime": {"device": "0", "precision": "fp16", "conf": 0.25, "iou": 0.6},
+        "screening": {"warmup": 20, "iterations": 100},
+    }
+
+
+def test_production_adapters_evaluate_with_yolo_validation_arguments_and_normalise_metrics(monkeypatch):
+    wrapper = _ProductionWrapper(nn.Conv2d(3, 4, 1))
+    yolo_paths: list[str] = []
+    stats_calls: list[nn.Module] = []
+
+    class FakeYOLO:
+        def __new__(cls, checkpoint: str):
+            yolo_paths.append(checkpoint)
+            return wrapper
+
+    def fake_collect_model_stats(model):
+        stats_calls.append(model)
+        return {"parameters": 3_011_628}
+
+    monkeypatch.setitem(sys.modules, "ultralytics", types.SimpleNamespace(YOLO=FakeYOLO))
+    monkeypatch.setattr(screening_module, "collect_model_stats", fake_collect_model_stats, raising=False)
+
+    adapters = ScreeningAdapters.defaults(_production_config())
+    loaded = adapters.load_model("models/checkpoints/yolov8/train3/weights/best.pt")
+    metrics = adapters.evaluate(loaded, _production_config())
+    stats = adapters.stats(loaded)
+
+    assert yolo_paths == ["models/checkpoints/yolov8/train3/weights/best.pt"]
+    assert wrapper.val_calls == [{
+        "data": "data/camel/camel.yaml", "split": "val", "imgsz": 352, "device": "0",
+        "conf": 0.25, "iou": 0.6, "batch": 1, "half": True, "verbose": False,
+    }]
+    assert metrics == {
+        "map50_95": 0.75408, "map50": 0.901, "precision": 0.812, "recall": 0.723,
+        "per_class_ap": [0.71, 0.72, 0.73, 0.74],
+    }
+    assert stats == {"parameters": 3_011_628}
+    assert stats_calls == [wrapper.model]
+
+
+def test_production_adapters_prune_one_physical_index_with_a_352_pixel_example_input(monkeypatch):
+    wrapper = _ProductionWrapper(nn.Conv2d(3, 4, 1))
+    probe_calls: list[tuple[nn.Module, torch.Tensor, str, tuple[int, ...]]] = []
+
+    def fake_probe(model, example_input, layer, physical_indices):
+        probe_calls.append((model, example_input, layer, physical_indices))
+        return model
+
+    monkeypatch.setattr(screening_module, "run_filterwise_probe", fake_probe, raising=False)
+    adapters = ScreeningAdapters.defaults(_production_config())
+
+    pruned = adapters.prune_filter(wrapper, "model.6.m.0.cv1.conv", 17, _production_config())
+
+    assert pruned is wrapper.model
+    model, example_input, layer, physical_indices = probe_calls[0]
+    assert model is wrapper.model
+    assert tuple(example_input.shape) == (1, 3, 352, 352)
+    assert layer == "model.6.m.0.cv1.conv"
+    assert physical_indices == (17,)
+
+
+def test_production_adapters_profile_on_configured_cuda_device_in_requested_precision(monkeypatch):
+    model = _ProfileModel()
+    wrapper = _ProductionWrapper(model)
+    benchmark_calls: list[tuple[nn.Module, torch.Tensor, dict]] = []
+    tensor_moves: list[object] = []
+    original_tensor_to = torch.Tensor.to
+
+    def fake_tensor_to(tensor, *args, **kwargs):
+        target = args[0] if args else kwargs.get("device")
+        tensor_moves.append(target)
+        if target in ("cuda:0", torch.device("cuda:0")):
+            return tensor
+        return original_tensor_to(tensor, *args, **kwargs)
+
+    def fake_benchmark(profiled_model, example_input, **kwargs):
+        benchmark_calls.append((profiled_model, example_input, kwargs))
+        return {"latency_mean_ms": 3.5, "latency_p50_ms": 3.2, "latency_p95_ms": 4.1, "fps": 285.7}
+
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(torch.Tensor, "to", fake_tensor_to)
+    monkeypatch.setattr(screening_module, "benchmark_pytorch_cuda_forward", fake_benchmark, raising=False)
+    adapters = ScreeningAdapters.defaults(_production_config())
+
+    profile = adapters.profile(wrapper, _production_config())
+
+    assert model.moves == ["cuda:0"]
+    assert model.half_calls == 1
+    assert tensor_moves == ["cuda:0"]
+    profiled_model, example_input, kwargs = benchmark_calls[0]
+    assert profiled_model is model
+    assert tuple(example_input.shape) == (1, 3, 352, 352)
+    assert example_input.dtype == torch.float16
+    assert kwargs == {"warmup": 20, "iterations": 100}
+    assert profile["latency_p50_ms"] == 3.2
+
+
+def test_production_adapters_fail_fast_when_cuda_is_unavailable_before_baseline_evaluation(monkeypatch):
+    baseline_evaluations = 0
+
+    def fake_yolo(_checkpoint):
+        nonlocal baseline_evaluations
+        wrapper = _ProductionWrapper(nn.Conv2d(3, 4, 1))
+        original_val = wrapper.val
+
+        def val(**kwargs):
+            nonlocal baseline_evaluations
+            baseline_evaluations += 1
+            return original_val(**kwargs)
+
+        wrapper.val = val
+        return wrapper
+
+    monkeypatch.setitem(sys.modules, "ultralytics", types.SimpleNamespace(YOLO=fake_yolo))
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
+
+    with pytest.raises(RuntimeError, match="CUDA.*unavailable"):
+        ScreeningAdapters.defaults(_production_config())
+
+    assert baseline_evaluations == 0
