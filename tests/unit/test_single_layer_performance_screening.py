@@ -414,6 +414,15 @@ def test_structural_failure_skips_the_rest_of_its_layer_and_continues_with_the_n
     assert any(layer == "layer_b" for layer, _physical, _history in prunes)
 
 
+def test_channel_shape_runtime_error_is_classified_as_structural():
+    error = RuntimeError(
+        "Given groups=1, weight of size [64, 64, 3, 3], expected input[1, 63, 22, 22] "
+        "to have 64 channels, but got 63 channels instead"
+    )
+
+    assert screening_module._is_structural_error(error)
+
+
 def test_out_of_memory_persists_failed_rank_stops_then_retries_it_on_resume(tmp_path):
     config_path = _screening_config(tmp_path, ["layer_a"])
 

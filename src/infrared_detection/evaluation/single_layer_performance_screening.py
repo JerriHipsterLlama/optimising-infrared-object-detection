@@ -454,7 +454,7 @@ def _is_structural_error(error: BaseException) -> bool:
     message = str(error).lower()
     return bool(re.search(r"dependency[- ]graph.*\breject", message)) or bool(
         re.search(r"channel(?:s)?\s+(?:mismatch|mis-match)", message)
-    )
+    ) or bool(re.search(r"expected input.*to have \d+ channels, but got \d+ channels", message))
 
 
 def _discard_pending_checkpoint(output_dir: Path) -> None:
