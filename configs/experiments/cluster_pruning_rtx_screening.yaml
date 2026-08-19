@@ -19,7 +19,7 @@ runtime:
 
 pruning:
   protected_layers: [model.0, model.22]
-  safe_layers: [model.2.cv2.conv, model.4.cv2.conv, model.6.cv2.conv]
+  safe_layers: [model.4.cv2.conv, model.6.cv2.conv, model.8.cv2.conv]
   cluster_sizes: [8, 16, 32]
   probe_ratios: [0.05]
   global_ratios: [0.10, 0.20, 0.30]

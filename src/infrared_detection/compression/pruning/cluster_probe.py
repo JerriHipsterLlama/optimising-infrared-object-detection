@@ -40,7 +40,7 @@ def run_filterwise_probe(
         raise ValueError(f"Filter-wise probes cannot target detection head module {layer_name}.")
     graph = build_yolo_dependency_graph(model, example_input)
     module = graph.modules[layer_name]
-    output_channels = module.out_channels if isinstance(module, nn.Conv2d) else module.out_features
+    output_channels = int(module.weight.shape[0])
     keep_mask = make_keep_mask(output_channels, prune_indices)
     if not bool(keep_mask.any()):
         raise ValueError(f"Probe for {layer_name} removes every output channel.")

@@ -21,6 +21,9 @@ def compute_channel_importance(
     scores = {}
     for name, module in model.named_modules():
         if isinstance(module, (nn.Conv2d, nn.Linear)):
-            weight = module.weight.detach().reshape(module.out_channels if isinstance(module, nn.Conv2d) else module.out_features, -1)
+            # Torch-Pruning can leave the descriptive channel metadata stale
+            # for branched modules after dependency propagation. The physical
+            # tensor shape is the authoritative number of output filters.
+            weight = module.weight.detach().reshape(module.weight.shape[0], -1)
             scores[name] = weight.abs().sum(dim=1) if criterion == "l1" else weight.square().sum(dim=1).sqrt()
     return scores

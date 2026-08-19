@@ -250,6 +250,17 @@ def test_filterwise_step_recomputes_minimum_weight_and_removes_one_filter(monkey
     ]
 
 
+def test_channel_importance_uses_physical_conv_weight_width_when_metadata_is_stale():
+    from infrared_detection.compression.pruning import compute_channel_importance
+
+    module = torch.nn.Conv2d(3, 4, kernel_size=1)
+    module.out_channels = 3
+
+    scores = compute_channel_importance(module)
+
+    assert scores[""] .shape == (4,)
+
+
 def test_filterwise_probe_returns_the_pruned_model(monkeypatch, tmp_path):
     model = _importance_model()
     config = yaml.safe_load(write_config(tmp_path).read_text(encoding="utf-8"))
@@ -364,6 +375,27 @@ def test_filterwise_workflow_resumes_completed_rows_from_checkpoint(monkeypatch,
     assert calls == {"evaluate": 0, "export": 0, "profile": 0}
 
 
+def test_filterwise_workflow_rebuilds_when_saved_candidate_checkpoint_is_missing(tmp_path, adapters):
+    config_path = write_config(tmp_path)
+    config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    config["pruning"]["safe_layers"] = ["model.1"]
+    config["pruning"]["filter_sweep_layers"] = ["model.1"]
+    config["pruning"]["filter_sweep_widths"] = {"model.1": 3}
+    config["export"] = {"format": "onnx"}
+    config_path.write_text(yaml.safe_dump(config), encoding="utf-8")
+
+    first_run = run_filterwise_evaluation(config_path, adapters=adapters)
+    Path(first_run[1]["checkpoint_path"]).unlink()
+
+    calls = {"evaluate": 0}
+    adapters.evaluate = lambda model, config, device: calls.__setitem__("evaluate", calls["evaluate"] + 1) or _metrics(0.50)
+
+    rows = run_filterwise_evaluation(config_path, adapters=adapters)
+
+    assert calls["evaluate"] == 0
+    assert all(row["status"] == "screened_in" for row in rows[1:])
+
+
 def test_filterwise_workflow_prunes_sequentially_and_can_continue_full_curve(tmp_path, adapters):
     config_path = write_config(tmp_path)
     config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
@@ -457,6 +489,57 @@ def test_filterwise_workflow_early_stops_after_consecutive_near_zero_accuracy(tm
     assert [row["status"] for row in candidates[:2]] == ["screened_out", "screened_out"]
     assert all(row["status"] == "skipped" for row in candidates[2:])
     assert all("early stopping" in row["reason"].lower() for row in candidates[2:])
+
+
+def test_filterwise_workflow_preserves_saved_skipped_rows_without_retrying(tmp_path, adapters):
+    config_path = write_config(tmp_path)
+    config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    config["pruning"]["safe_layers"] = ["model.1"]
+    config["pruning"]["filter_sweep_layers"] = ["model.1"]
+    config["pruning"]["filter_sweep_widths"] = {"model.1": 4}
+    config["screening"] = {
+        "max_map50_95_drop": 0.02,
+        "early_stop": True,
+        "early_stop_map50_95": 0.001,
+        "early_stop_consecutive": 1,
+        "latency_profile_removals": [],
+    }
+    config_path.write_text(yaml.safe_dump(config), encoding="utf-8")
+    adapters.evaluate = lambda model, config, device: _metrics(0.0)
+
+    first_rows = run_filterwise_evaluation(config_path, adapters=adapters)
+    skipped_ids = {row["candidate_id"] for row in first_rows if row["status"] == "skipped"}
+    assert skipped_ids
+
+    calls = {"evaluate": 0}
+    adapters.evaluate = lambda model, config, device: calls.__setitem__("evaluate", calls["evaluate"] + 1) or _metrics(0.0)
+    second_rows = run_filterwise_evaluation(config_path, adapters=adapters)
+
+    assert calls["evaluate"] == 0
+    assert {row["candidate_id"] for row in second_rows if row["status"] == "skipped"} == skipped_ids
+
+
+def test_filterwise_channel_mismatch_failures_are_permanently_skipped():
+    row = {"stage": "filterwise", "status": "planned"}
+
+    cluster_workflow._failure(
+        row,
+        RuntimeError(
+            "Given groups=1, weight of size [128, 128, 3, 3], "
+            "expected input[1, 127, 44, 44] to have 128 channels, but got 127 channels instead"
+        ),
+    )
+
+    assert row["status"] == "skipped"
+    assert "structural channel mismatch" in row["reason"]
+
+
+def test_non_structural_filterwise_failures_remain_retryable():
+    row = {"stage": "filterwise", "status": "planned"}
+
+    cluster_workflow._failure(row, RuntimeError("CUDA out of memory"))
+
+    assert row["status"] == "failed"
 
 
 def test_filterwise_early_stop_requires_accuracy_strictly_below_threshold(tmp_path, adapters):

@@ -22,6 +22,12 @@ Metrics = dict[str, Any]
 _ORIN_TARGET = "jetson_orin_nano"
 _FEASIBLE_STATUSES = frozenset({"primary_feasible", "exploratory_feasible"})
 _RESUMABLE_FILTERWISE_STATUSES = frozenset({"completed", "screened_in", "screened_out", "rejected_accuracy"})
+_TERMINAL_FILTERWISE_STATUSES = frozenset({"skipped"})
+_FILTERWISE_CHANNEL_MISMATCH_RE = re.compile(
+    r"Given groups=\d+, weight of size \[\d+, \d+, \d+, \d+\], "
+    r"expected input\[\d+, \d+, \d+, \d+\] to have \d+ channels, "
+    r"but got \d+ channels instead"
+)
 _JETSON_HARDWARE_FIELDS = (
     "latency_mean_ms",
     "latency_p50_ms",
@@ -319,9 +325,9 @@ def _filterwise_layer_widths(model: Any, layers: Sequence[str]) -> dict[str, int
     widths: dict[str, int] = {}
     for layer in layers:
         module = modules.get(layer)
-        if not isinstance(module, nn.Conv2d) or int(module.out_channels) <= 1:
+        if not isinstance(module, nn.Conv2d) or int(module.weight.shape[0]) <= 1:
             raise ValueError(f"Automatic filter-wise layer {layer!r} is not a prunable Conv2d module.")
-        widths[layer] = int(module.out_channels)
+        widths[layer] = int(module.weight.shape[0])
     return widths
 
 
@@ -348,6 +354,9 @@ def _metrics_row(row: Metrics, metrics: Mapping[str, Any], stats: Mapping[str, A
 def _failure(row: Metrics, exc: Exception) -> None:
     row["status"] = "failed"
     row["error"] = f"{type(exc).__name__}: {exc}"
+    if row.get("stage") == "filterwise" and _is_filterwise_channel_mismatch(row["error"]):
+        row["status"] = "skipped"
+        row["reason"] = "Skipped because structural channel mismatch: " + row["error"]
 
 
 def _skip(row: Metrics, reason: str) -> None:
@@ -643,15 +652,26 @@ def run_filterwise_evaluation(
                 _skip(row, f"Skipped because filter-wise layer screening excluded {layer}.")
             _write_artifacts(output_dir, resolved_config_path, rows)
             continue
-        completed = [row for row in layer_rows if _row_is_resumable(row)]
-        if len(completed) == len(layer_rows):
+        recorded = [_row_is_recorded(row) for row in layer_rows]
+        if all(recorded):
             continue
-        if completed:
-            current_model = active.load_model(Path(completed[-1]["checkpoint_path"]))
-            pending_rows = layer_rows[len(completed):]
+        checkpointed = [
+            (index, row)
+            for index, row in enumerate(layer_rows)
+            if _row_is_resumable(row)
+        ]
+        if checkpointed:
+            checkpoint_index, checkpoint_row = checkpointed[-1]
+            current_model = active.load_model(Path(checkpoint_row["checkpoint_path"]))
+            pending_rows = [
+                row for row in layer_rows[checkpoint_index + 1:]
+                if not _row_is_recorded(row)
+            ]
         else:
             current_model = active.load_model(checkpoint)
-            pending_rows = layer_rows
+            pending_rows = [row for row in layer_rows if not _row_is_recorded(row)]
+        if not pending_rows:
+            continue
         consecutive_near_zero = 0
         for row in pending_rows:
             try:
@@ -781,7 +801,7 @@ def _structural_probe(model: Any, layer: str, cluster_size: int, ratio: float, c
     module = dict(unwrapped.named_modules()).get(layer)
     if not isinstance(module, nn.Conv2d):
         raise ValueError(f"Structural probe target {layer!r} is not a prunable Conv2d module.")
-    width = int(module.out_channels)
+    width = int(module.weight.shape[0])
     requested_clusters = max(1, int(width * ratio) // cluster_size)
     available_clusters = (width - 1) // cluster_size
     if available_clusters < 1:
@@ -825,7 +845,7 @@ def _filterwise_probe(model: Any, layer: str, filters_removed: int, config: Mapp
     module = dict(unwrapped.named_modules()).get(layer)
     if not isinstance(module, nn.Conv2d):
         raise ValueError(f"Filter-wise probe target {layer!r} is not a prunable Conv2d module.")
-    if filters_removed <= 0 or filters_removed >= int(module.out_channels):
+    if filters_removed <= 0 or filters_removed >= int(module.weight.shape[0]):
         raise ValueError(f"Filter-wise probe for {layer!r} must remove between 1 and output_channels - 1 filters.")
     scores = compute_channel_importance(unwrapped)
     if layer not in scores:
@@ -855,8 +875,27 @@ def _row_is_resumable(row: Mapping[str, Any]) -> bool:
         and row.get("parameter_count") is not None
     )
     if row.get("stage") == "baseline":
-        return bool(common and row.get("serialized_bytes") is not None and row.get("exported_path"))
-    return bool(common and row.get("checkpoint_path"))
+        exported_path = row.get("exported_path")
+        return bool(
+            common
+            and row.get("serialized_bytes") is not None
+            and exported_path
+            and Path(str(exported_path)).is_file()
+        )
+    checkpoint_path = row.get("checkpoint_path")
+    return bool(common and checkpoint_path and Path(str(checkpoint_path)).is_file())
+
+
+def _row_is_recorded(row: Mapping[str, Any]) -> bool:
+    """Return whether a candidate result is final even if its checkpoint was cleaned up."""
+
+    if row.get("stage") != "filterwise":
+        return _row_is_resumable(row)
+    return bool(
+        row.get("status") in _RESUMABLE_FILTERWISE_STATUSES
+        and row.get("map50_95") is not None
+        and row.get("parameter_count") is not None
+    ) or _row_is_terminal_exclusion(row)
 
 
 def _should_profile_filterwise(row: Mapping[str, Any], config: Mapping[str, Any]) -> bool:
@@ -899,10 +938,27 @@ def _load_filterwise_checkpoint(output_dir: Path, config_path: Path, rows: list[
     }
     for row in rows:
         saved = saved_rows.get(str(row["candidate_id"]))
-        if saved is not None and _row_is_resumable(saved):
-            row.clear()
-            row.update(saved)
+        if saved is not None:
+            saved = dict(saved)
+            if saved.get("stage") == "filterwise" and saved.get("status") == "failed" and _is_filterwise_channel_mismatch(saved.get("error")):
+                saved["status"] = "skipped"
+                saved["reason"] = "Skipped because structural channel mismatch: " + str(saved.get("error"))
+            if _row_is_recorded(saved) or saved.get("status") == "failed":
+                row.clear()
+                row.update(saved)
     return rows
+
+
+def _row_is_terminal_exclusion(row: Mapping[str, Any]) -> bool:
+    """Return whether a saved row was intentionally excluded from evaluation."""
+
+    return row.get("status") in _TERMINAL_FILTERWISE_STATUSES
+
+
+def _is_filterwise_channel_mismatch(error: str | None) -> bool:
+    """Return whether an error describes an invalid propagated channel topology."""
+
+    return bool(error and _FILTERWISE_CHANNEL_MISMATCH_RE.search(str(error)))
 
 
 def _filterwise_step(model: Any, layer: str, config: Mapping[str, Any]) -> Any:
@@ -918,7 +974,7 @@ def _filterwise_step(model: Any, layer: str, config: Mapping[str, Any]) -> Any:
     module = dict(unwrapped.named_modules()).get(layer)
     if not isinstance(module, nn.Conv2d):
         raise ValueError(f"Filter-wise step target {layer!r} is not a prunable Conv2d module.")
-    if int(module.out_channels) <= 1:
+    if int(module.weight.shape[0]) <= 1:
         raise ValueError(f"Filter-wise step for {layer!r} cannot remove the final output filter.")
     scores = compute_channel_importance(unwrapped)
     if layer not in scores:

@@ -18,3 +18,4 @@ artifacts/**
 __pycache__/
 *.py[cod]
 runs/
+yolo*.pt
