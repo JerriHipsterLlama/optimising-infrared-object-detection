@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import statistics
+import time
 from collections.abc import Callable
 from typing import Any, Protocol
 
@@ -31,6 +32,18 @@ class CudaEventTimer:
         return float(start.elapsed_time(end))
 
 
+class CpuWallClockTimer:
+    """Measure a CPU operation with a monotonic wall clock."""
+
+    def synchronize(self) -> None:
+        return None
+
+    def measure(self, operation: Callable[[], Any]) -> float:
+        start = time.perf_counter()
+        operation()
+        return (time.perf_counter() - start) * 1000.0
+
+
 def benchmark_pytorch_cuda_forward(
     model: torch.nn.Module,
     example_input: torch.Tensor,
@@ -45,9 +58,7 @@ def benchmark_pytorch_cuda_forward(
     if iterations <= 0:
         raise ValueError("iterations must be positive")
     if timer is None:
-        if not example_input.is_cuda:
-            raise ValueError("example_input must be a CUDA tensor when timer is not supplied")
-        timer = CudaEventTimer()
+        timer = CudaEventTimer() if example_input.is_cuda else CpuWallClockTimer()
 
     with torch.inference_mode():
         for _ in range(warmup):

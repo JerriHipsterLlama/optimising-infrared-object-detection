@@ -83,12 +83,14 @@ class ScreeningAdapters:
         """Build the real YOLO/CUDA adapters without importing optional services at module import time."""
         import torch
 
-        configured_device = str(config.get("runtime", {}).get("device", "0"))
-        if configured_device in {"0", "cuda", "cuda:0"} and not torch.cuda.is_available():
+        configured_device = str(config.get("runtime", {}).get("device", "0")).lower()
+        if configured_device not in {"cpu", "mps"} and not torch.cuda.is_available():
             raise RuntimeError("CUDA is unavailable; single-layer performance screening requires CUDA")
 
-        def cuda_device(settings: dict) -> str:
-            device = str(settings["runtime"].get("device", "0"))
+        def runtime_device(settings: dict) -> str:
+            device = str(settings["runtime"].get("device", "0")).lower()
+            if device in {"cpu", "mps"}:
+                return device
             if not torch.cuda.is_available():
                 raise RuntimeError("CUDA is unavailable; single-layer performance screening requires CUDA")
             return device if device.startswith("cuda:") else f"cuda:{device}"
@@ -100,11 +102,11 @@ class ScreeningAdapters:
             _install_legacy_pathlib_checkpoint_compatibility()
             from ultralytics import YOLO
 
-            cuda_device(config)
+            runtime_device(config)
             return YOLO(str(checkpoint))
 
         def evaluate(wrapper, settings: dict) -> dict:
-            cuda_device(settings)
+            runtime_device(settings)
             runtime = settings["runtime"]
             experiment = settings["experiment"]
             data = settings["data"]
@@ -136,7 +138,7 @@ class ScreeningAdapters:
             return wrapper
 
         def profile(wrapper, settings: dict) -> dict:
-            device = cuda_device(settings)
+            device = runtime_device(settings)
             precision = settings["runtime"].get("precision", "fp32")
             model = unwrap(wrapper).to(device)
             if precision == "fp16":
