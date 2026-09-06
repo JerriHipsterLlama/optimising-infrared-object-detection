@@ -9,9 +9,21 @@ from itertools import pairwise
 import json
 from pathlib import Path
 from types import MappingProxyType
-from typing import Any, Iterable, Mapping, Sequence
+from typing import Any, Callable, Iterable, Mapping, Sequence
 
+import torch
+from torch import nn
 import yaml
+
+from infrared_detection.compression.pruning.unit_discovery import (
+    DetectContract,
+    PruningUnit,
+    StructuralProbe,
+    capture_detect_contract,
+    discover_pruning_units,
+    serialize_dependency_group,
+    validate_and_prune_unit,
+)
 
 
 DEFAULT_RATIOS = (0.125, 0.25, 0.375, 0.5)
@@ -66,6 +78,78 @@ class ResumeArtifacts:
     rows: tuple[dict[str, str], ...]
     manifest: Mapping[str, Any]
     reusable_candidate_ids: set[str]
+
+
+@dataclass(frozen=True)
+class ValidationMetrics:
+    map50_95: float
+    map50: float
+    precision: float
+    recall: float
+
+
+@dataclass(frozen=True)
+class SensitivityAdapters:
+    @classmethod
+    def defaults(cls) -> "SensitivityAdapters":
+        """Build production Ultralytics and Torch-Pruning operations lazily."""
+
+        def load_model(checkpoint: Path) -> Any:
+            from infrared_detection.evaluation.single_layer_performance_screening import (
+                _install_legacy_pathlib_checkpoint_compatibility,
+            )
+            from ultralytics import YOLO
+
+            _install_legacy_pathlib_checkpoint_compatibility()
+            return YOLO(str(checkpoint))
+
+        def evaluate(wrapper: Any, arguments: Mapping[str, Any]) -> ValidationMetrics:
+            result = wrapper.val(**dict(arguments))
+            box = result.box
+            return ValidationMetrics(
+                map50_95=float(box.map),
+                map50=float(box.map50),
+                precision=float(box.mp),
+                recall=float(box.mr),
+            )
+
+        def make_example(model: nn.Module, size: int) -> torch.Tensor:
+            parameter = next(model.parameters())
+            return torch.randn(
+                1, 3, size, size, device=parameter.device, dtype=parameter.dtype
+            )
+
+        def versions() -> Mapping[str, str]:
+            import torch_pruning
+            import ultralytics
+
+            return {
+                "torch": torch.__version__,
+                "ultralytics": ultralytics.__version__,
+                "torch_pruning": getattr(torch_pruning, "__version__", "unknown"),
+            }
+
+        return cls(
+            load_model=load_model,
+            unwrap_model=lambda wrapper: wrapper.model,
+            replace_model=lambda wrapper, model: setattr(wrapper, "model", model),
+            evaluate=evaluate,
+            make_example_input=make_example,
+            capture_contract=capture_detect_contract,
+            forward=lambda model, example: model.eval()(example),
+            versions=versions,
+        )
+
+    load_model: Callable[[Path], Any]
+    unwrap_model: Callable[[Any], nn.Module]
+    replace_model: Callable[[Any, nn.Module], None]
+    evaluate: Callable[[Any, Mapping[str, Any]], ValidationMetrics]
+    make_example_input: Callable[[nn.Module, int], torch.Tensor]
+    discover_units: Callable[[nn.Module], tuple[PruningUnit, ...]] = discover_pruning_units
+    capture_contract: Callable[[nn.Module, Any], DetectContract | None] | None = None
+    forward: Callable[[nn.Module, torch.Tensor], Any] | None = None
+    probe: Callable[..., StructuralProbe] = validate_and_prune_unit
+    versions: Callable[[], Mapping[str, str]] = lambda: {}
 
 
 def calculate_point_metrics(
@@ -251,6 +335,207 @@ def load_resume_artifacts(
         row["candidate_id"] for row in rows if row.get("status") in reusable_statuses
     }
     return ResumeArtifacts(rows, manifest, reusable)
+
+
+def _validation_arguments(config: SensitivityConfig) -> dict[str, Any]:
+    arguments = dict(config.validation)
+    arguments.update(
+        data=str(config.dataset_yaml),
+        split=config.split,
+        plots=False,
+        save_json=False,
+        verbose=False,
+    )
+    return arguments
+
+
+def _baseline_row(config: SensitivityConfig, metrics: ValidationMetrics) -> dict[str, Any]:
+    return {
+        "candidate_id": "baseline",
+        "status": "BASELINE",
+        "map50_95": metrics.map50_95,
+        "map50": metrics.map50,
+        "precision": metrics.precision,
+        "recall": metrics.recall,
+        "checkpoint": str(config.checkpoint),
+        "dataset": str(config.dataset_yaml),
+        "split": config.split,
+        "importance": config.importance,
+    }
+
+
+def _float_value(row: Mapping[str, Any], key: str) -> float:
+    value = row.get(key)
+    if value in (None, ""):
+        raise ValueError(f"Required numeric result field is missing: {key}")
+    return float(value)
+
+
+def _candidate_id(unit_name: str, ratio: float) -> str:
+    return f"{unit_name}@{format(float(ratio), 'g')}"
+
+
+def _probe_row(
+    config: SensitivityConfig,
+    unit: PruningUnit,
+    probe: StructuralProbe,
+    validation_fingerprint: str,
+) -> dict[str, Any]:
+    return {
+        "candidate_id": _candidate_id(unit.name, probe.requested_pruning_ratio),
+        "status": probe.status,
+        "pruning_unit": unit.name,
+        "architectural_region": unit.region,
+        "original_channels": probe.original_channels,
+        "requested_pruned_channels": probe.requested_pruned_channels,
+        "requested_remaining_channels": probe.requested_remaining_channels,
+        "actual_remaining_channels": probe.actual_remaining_channels,
+        "requested_pruning_ratio": probe.requested_pruning_ratio,
+        "actual_pruning_ratio": probe.actual_pruning_ratio,
+        "touched_modules": ";".join(probe.touched_modules),
+        "dependency_group_json": serialize_dependency_group(probe.operations),
+        "status_reason": probe.reason,
+        "error": probe.error,
+        "checkpoint": str(config.checkpoint),
+        "dataset": str(config.dataset_yaml),
+        "split": config.split,
+        "importance": config.importance,
+        "validation_fingerprint": validation_fingerprint,
+    }
+
+
+def run_accuracy_sensitivity(
+    config_path: str | Path,
+    *,
+    adapters: SensitivityAdapters | None = None,
+    on_result: Callable[[dict[str, Any]], None] | None = None,
+) -> list[dict[str, Any]]:
+    """Run independent dense-checkpoint structural sensitivity experiments."""
+
+    if adapters is None:
+        adapters = SensitivityAdapters.defaults()
+    config = load_sensitivity_config(config_path)
+    versions = dict(adapters.versions())
+    fingerprint = experiment_fingerprint(config, versions=versions)
+    resume = load_resume_artifacts(config.output_dir, expected_fingerprint=fingerprint)
+    rows_by_id = {row["candidate_id"]: dict(row) for row in resume.rows}
+    validation = _validation_arguments(config)
+    validation_fingerprint = hashlib.sha256(
+        json.dumps(validation, sort_keys=True, separators=(",", ":"), default=str).encode("utf-8")
+    ).hexdigest()
+
+    baseline_wrapper = adapters.load_model(config.checkpoint)
+    baseline_model = adapters.unwrap_model(baseline_wrapper)
+    units = adapters.discover_units(baseline_model)
+    baseline_example = adapters.make_example_input(baseline_model, config.example_image_size)
+    baseline_contract = None
+    if adapters.capture_contract is not None and adapters.forward is not None:
+        baseline_contract = adapters.capture_contract(
+            baseline_model,
+            adapters.forward(baseline_model, baseline_example),
+        )
+
+    baseline = rows_by_id.get("baseline")
+    if baseline is None or baseline.get("status") != "BASELINE":
+        baseline_metrics = adapters.evaluate(baseline_wrapper, validation)
+        baseline = _baseline_row(config, baseline_metrics)
+        baseline["validation_fingerprint"] = validation_fingerprint
+        rows_by_id["baseline"] = baseline
+        if on_result is not None:
+            on_result(dict(baseline))
+    baseline_map = _float_value(baseline, "map50_95")
+
+    manifest: dict[str, Any] = {
+        "fingerprint": fingerprint,
+        "versions": versions,
+        "baseline": dict(baseline),
+        "detect_contract": None if baseline_contract is None else baseline_contract.__dict__,
+        "units": [unit.__dict__ for unit in units],
+        "ratios": list(config.ratios),
+        "importance": config.importance,
+        "complete": False,
+    }
+    write_artifacts(
+        config.output_dir,
+        rows_by_id.values(),
+        build_unit_rankings(rows_by_id.values(), config.ratios),
+        manifest,
+        ratios=config.ratios,
+    )
+
+    for unit in units:
+        for ratio in config.ratios:
+            candidate_id = _candidate_id(unit.name, ratio)
+            if candidate_id in resume.reusable_candidate_ids:
+                continue
+            try:
+                wrapper = adapters.load_model(config.checkpoint)
+                dense_model = adapters.unwrap_model(wrapper)
+                example = adapters.make_example_input(dense_model, config.example_image_size)
+                probe = adapters.probe(
+                    dense_model,
+                    example,
+                    unit.name,
+                    ratio,
+                    baseline_contract,
+                    criterion=config.importance,
+                )
+                row = _probe_row(config, unit, probe, validation_fingerprint)
+                if probe.status == "VALID":
+                    if probe.model is None:
+                        raise RuntimeError("A VALID structural probe did not return a pruned model.")
+                    adapters.replace_model(wrapper, probe.model)
+                    metrics = adapters.evaluate(wrapper, validation)
+                    row.update(
+                        status="COMPLETED",
+                        map50_95=metrics.map50_95,
+                        map50=metrics.map50,
+                        precision=metrics.precision,
+                        recall=metrics.recall,
+                    )
+                    point = calculate_point_metrics(
+                        baseline_map,
+                        metrics.map50_95,
+                        float(probe.actual_pruning_ratio),
+                    )
+                    row.update(point.__dict__)
+            except Exception as error:
+                row = {
+                    "candidate_id": candidate_id,
+                    "status": "ERROR",
+                    "pruning_unit": unit.name,
+                    "architectural_region": unit.region,
+                    "original_channels": unit.original_channels,
+                    "requested_pruning_ratio": ratio,
+                    "status_reason": "runtime_error",
+                    "error": str(error),
+                    "checkpoint": str(config.checkpoint),
+                    "dataset": str(config.dataset_yaml),
+                    "split": config.split,
+                    "importance": config.importance,
+                    "validation_fingerprint": validation_fingerprint,
+                }
+            rows_by_id[candidate_id] = row
+            rankings = build_unit_rankings(rows_by_id.values(), config.ratios)
+            write_artifacts(
+                config.output_dir,
+                rows_by_id.values(),
+                rankings,
+                manifest,
+                ratios=config.ratios,
+            )
+            if on_result is not None:
+                on_result(dict(row))
+
+    manifest["complete"] = all(
+        _candidate_id(unit.name, ratio) in rows_by_id
+        and rows_by_id[_candidate_id(unit.name, ratio)].get("status") != "ERROR"
+        for unit in units
+        for ratio in config.ratios
+    )
+    rankings = build_unit_rankings(rows_by_id.values(), config.ratios)
+    write_artifacts(config.output_dir, rows_by_id.values(), rankings, manifest, ratios=config.ratios)
+    return list(rows_by_id.values())
 
 
 def build_unit_rankings(

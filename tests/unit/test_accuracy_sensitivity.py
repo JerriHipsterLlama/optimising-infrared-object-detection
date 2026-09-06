@@ -3,20 +3,31 @@ from __future__ import annotations
 import csv
 import json
 from pathlib import Path
+import sys
+import types
 
 import pytest
+import torch
+from torch import nn
 import yaml
 
+from infrared_detection.compression.pruning.unit_discovery import (
+    PruningUnit,
+    StructuralProbe,
+)
 from infrared_detection.evaluation.accuracy_sensitivity import (
     AGGREGATE_FIELDS,
     DEFAULT_RATIOS,
     DETAILED_FIELDS,
+    SensitivityAdapters,
+    ValidationMetrics,
     build_unit_rankings,
     calculate_point_metrics,
     experiment_fingerprint,
     load_resume_artifacts,
     load_sensitivity_config,
     normalized_degradation_auc,
+    run_accuracy_sensitivity,
     write_artifacts,
 )
 
@@ -190,3 +201,156 @@ def test_experiment_fingerprint_changes_with_validation_or_input_metadata(tmp_pa
     assert first == same
     config.dataset_yaml.write_text("path: changed\n", encoding="utf-8")
     assert first != experiment_fingerprint(config, versions={"torch": "test"})
+
+
+class FakeModel(nn.Module):
+    def __init__(self, unit_names=("unit",)) -> None:
+        super().__init__()
+        for unit_name in unit_names:
+            self.add_module(unit_name, nn.Conv2d(1, 8, 1, bias=False))
+        self.history: tuple[tuple[str, float], ...] = ()
+
+
+class FakeWrapper:
+    def __init__(self, model: FakeModel) -> None:
+        self.model = model
+
+
+def _probe(status_by_unit, histories):
+    def probe(model, example_input, unit_name, ratio, baseline_contract, criterion="l1"):
+        histories.append(model.history)
+        status = status_by_unit.get(unit_name, "VALID")
+        pruned_model = model if status == "VALID" else None
+        if pruned_model is not None:
+            pruned_model.history = ((unit_name, ratio),)
+        return StructuralProbe(
+            status=status,
+            unit_name=unit_name,
+            original_channels=8,
+            requested_pruned_channels=round(8 * ratio),
+            requested_remaining_channels=8 - round(8 * ratio),
+            actual_remaining_channels=8 - round(8 * ratio) if status == "VALID" else None,
+            requested_pruning_ratio=ratio,
+            actual_pruning_ratio=ratio if status == "VALID" else None,
+            operations=(),
+            touched_modules=(unit_name,),
+            reason=None if status == "VALID" else status.lower(),
+            error=None,
+            model=pruned_model,
+        )
+    return probe
+
+
+def _recording_adapters(unit_names=("unit",), status_by_unit=None, fail_once=False):
+    loads = []
+    histories = []
+    evaluations = []
+    failure = {"pending": fail_once}
+
+    def load_model(_checkpoint):
+        wrapper = FakeWrapper(FakeModel(unit_names))
+        loads.append(wrapper.model.history)
+        return wrapper
+
+    def evaluate(wrapper, validation):
+        evaluations.append(dict(validation))
+        if wrapper.model.history and failure["pending"]:
+            failure["pending"] = False
+            raise RuntimeError("temporary validation failure")
+        drop = 0.01 if wrapper.model.history else 0.0
+        return ValidationMetrics(0.5 - drop, 0.6, 0.7, 0.8)
+
+    units = tuple(PruningUnit(name, "detect_head", 8) for name in unit_names)
+    adapters = SensitivityAdapters(
+        load_model=load_model,
+        unwrap_model=lambda wrapper: wrapper.model,
+        replace_model=lambda wrapper, model: setattr(wrapper, "model", model),
+        evaluate=evaluate,
+        make_example_input=lambda model, size: torch.zeros(1, 1, 4, 4),
+        discover_units=lambda model: units,
+        capture_contract=lambda model, output: None,
+        forward=lambda model, example: None,
+        probe=_probe(status_by_unit or {}, histories),
+        versions=lambda: {"test": "1"},
+    )
+    return adapters, loads, histories, evaluations
+
+
+def test_every_unit_ratio_loads_the_original_checkpoint_and_never_accumulates(tmp_path):
+    adapters, loads, histories, _evaluations = _recording_adapters()
+
+    run_accuracy_sensitivity(_write_config(tmp_path), adapters=adapters)
+
+    assert loads == [()] * 5  # baseline plus four independent candidates
+    assert histories == [()] * 4
+
+
+def test_baseline_and_candidates_receive_identical_validation_arguments(tmp_path):
+    adapters, _loads, _histories, evaluations = _recording_adapters()
+
+    rows = run_accuracy_sensitivity(_write_config(tmp_path), adapters=adapters)
+
+    assert len(evaluations) == 5
+    assert all(arguments == evaluations[0] for arguments in evaluations)
+    completed = next(row for row in rows if row["status"] == "COMPLETED")
+    assert completed["architectural_region"] == "detect_head"
+    assert completed["requested_pruned_channels"] == 1
+    assert completed["actual_remaining_channels"] == 7
+    assert completed["actual_pruning_ratio"] == 0.125
+    assert completed["touched_modules"] == "unit"
+
+
+def test_nonvalid_structural_rows_are_not_evaluated_and_next_candidate_continues(tmp_path):
+    names = ("grouped", "invalid", "semantic", "valid")
+    adapters, _loads, _histories, evaluations = _recording_adapters(
+        names,
+        {"grouped": "GROUPED", "invalid": "INVALID", "semantic": "SEMANTICS_CHANGED"},
+    )
+
+    rows = run_accuracy_sensitivity(
+        _write_config(tmp_path, ratios=[0.5]), adapters=adapters
+    )
+
+    assert len(evaluations) == 2  # baseline and the sole valid candidate
+    assert [row["status"] for row in rows if row["status"] != "BASELINE"] == [
+        "GROUPED", "INVALID", "SEMANTICS_CHANGED", "COMPLETED"
+    ]
+
+
+def test_runtime_error_is_retried_on_resume_from_a_fresh_checkpoint(tmp_path):
+    config = _write_config(tmp_path, ratios=[0.5])
+    first, _loads, _histories, _evaluations = _recording_adapters(fail_once=True)
+    first_rows = run_accuracy_sensitivity(config, adapters=first)
+    assert next(row for row in first_rows if row["status"] != "BASELINE")["status"] == "ERROR"
+
+    resumed, loads, histories, evaluations = _recording_adapters()
+    resumed_rows = run_accuracy_sensitivity(config, adapters=resumed)
+
+    assert loads == [(), ()]  # planning/baseline model plus retried candidate
+    assert histories == [()]
+    assert len(evaluations) == 1  # matching baseline metrics were resumed
+    assert next(row for row in resumed_rows if row["status"] != "BASELINE")["status"] == "COMPLETED"
+
+
+def test_default_adapters_return_ultralytics_box_metrics_and_forward_arguments(monkeypatch):
+    calls = []
+
+    class Wrapper:
+        def __init__(self, checkpoint):
+            self.checkpoint = checkpoint
+            self.model = nn.Conv2d(3, 8, 1)
+
+        def val(self, **kwargs):
+            calls.append(kwargs)
+            box = types.SimpleNamespace(map=0.51, map50=0.72, mp=0.63, mr=0.64)
+            return types.SimpleNamespace(box=box)
+
+    monkeypatch.setitem(sys.modules, "ultralytics", types.SimpleNamespace(YOLO=Wrapper, __version__="test"))
+    adapters = SensitivityAdapters.defaults()
+    wrapper = adapters.load_model(Path("dense.pt"))
+
+    metrics = adapters.evaluate(wrapper, {"data": "dataset.yaml", "half": False})
+
+    assert metrics == ValidationMetrics(0.51, 0.72, 0.63, 0.64)
+    assert calls == [{"data": "dataset.yaml", "half": False}]
+    assert tuple(adapters.make_example_input(wrapper.model, 32).shape) == (1, 3, 32, 32)
