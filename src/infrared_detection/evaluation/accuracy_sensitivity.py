@@ -243,6 +243,11 @@ def load_sensitivity_config(config_path: str | Path) -> SensitivityConfig:
     if bool(validation.get("half", False)):
         raise ValueError("Accuracy sensitivity screening supports FP32 validation only.")
     validation["half"] = False
+    device = validation.get("device")
+    if isinstance(device, bool) or not str(device).strip().isdigit():
+        raise ValueError(
+            "Accuracy sensitivity screening requires a numeric GPU device such as '0'."
+        )
     return SensitivityConfig(
         checkpoint=checkpoint,
         dataset_yaml=dataset,

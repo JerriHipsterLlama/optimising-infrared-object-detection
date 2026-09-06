@@ -116,7 +116,7 @@ def _write_config(tmp_path: Path, ratios=None, name="screening") -> Path:
         "validation": {
             "imgsz": 352,
             "batch": 1,
-            "device": "cpu",
+            "device": "0",
             "half": False,
             "conf": 0.25,
             "iou": 0.6,
@@ -153,6 +153,16 @@ def test_config_rejects_non_fp32_validation(tmp_path):
     path.write_text(yaml.safe_dump(payload, sort_keys=False), encoding="utf-8")
 
     with pytest.raises(ValueError, match="FP32"):
+        load_sensitivity_config(path)
+
+
+def test_config_rejects_non_cuda_validation(tmp_path):
+    path = _write_config(tmp_path)
+    payload = yaml.safe_load(path.read_text(encoding="utf-8"))
+    payload["validation"]["device"] = "cpu"
+    path.write_text(yaml.safe_dump(payload, sort_keys=False), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="GPU"):
         load_sensitivity_config(path)
 
 

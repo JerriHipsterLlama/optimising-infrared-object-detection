@@ -32,13 +32,16 @@ CHECKPOINT = Path(
 def _load_model():
     from ultralytics import YOLO
 
-    return YOLO(str(CHECKPOINT)).model.cpu().eval().requires_grad_(True)
+    return YOLO(str(CHECKPOINT)).model.cuda().float().eval().requires_grad_(True)
 
 
 @pytest.mark.skipif(not CHECKPOINT.is_file(), reason="trained YOLOv8n checkpoint unavailable")
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA GPU unavailable")
 def test_actual_yolov8n_audits_all_ratios_and_preserves_detect_contract():
     baseline = _load_model()
-    example = torch.randn(1, 3, 64, 64)
+    assert next(baseline.parameters()).is_cuda
+    assert next(baseline.parameters()).dtype == torch.float32
+    example = torch.randn(1, 3, 64, 64, device="cuda", dtype=torch.float32)
     with torch.inference_mode():
         contract = capture_detect_contract(baseline, baseline(example))
     units = discover_pruning_units(baseline)
