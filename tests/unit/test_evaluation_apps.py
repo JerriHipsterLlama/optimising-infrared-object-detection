@@ -122,7 +122,7 @@ def test_single_layer_performance_configs_have_approved_values_and_isolated_outp
         assert config["experiment"]["image_size"] == 352
         assert config["experiment"]["batch_size"] == 1
         assert config["experiment"]["output_dir"] == output_dir
-        assert config["runtime"] == {"device": "0", "precision": "fp16", "conf": 0.25, "iou": 0.6}
+        assert config["runtime"] == {"device": "0", "precision": "fp32", "conf": 0.25, "iou": 0.6}
         assert config["screening"]["warmup"] == 20
         assert config["screening"]["iterations"] == 100
         assert config["screening"]["layer_patterns"] == expected_patterns
