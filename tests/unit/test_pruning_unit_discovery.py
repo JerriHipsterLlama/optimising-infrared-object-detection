@@ -4,14 +4,20 @@ import pytest
 import torch
 from torch import nn
 
+from infrared_detection.compression.pruning import (
+    validate_and_prune_unit as public_validate_and_prune_unit,
+)
 from infrared_detection.compression.pruning.importance import (
     l1_filter_scores,
     rank_output_channels,
 )
 from infrared_detection.compression.pruning.unit_discovery import requested_prune_count
 from infrared_detection.compression.pruning.unit_discovery import (
+    DependencyOperation,
     capture_detect_contract,
     discover_pruning_units,
+    serialize_dependency_group,
+    validate_and_prune_unit,
     validate_detect_contract,
 )
 
@@ -64,6 +70,28 @@ def four_class_detect_fixture():
         },
     )
     return model, output
+
+
+class SequentialNet(nn.Module):
+    def __init__(self) -> None:
+        super().__init__()
+        self.root = nn.Conv2d(3, 8, 1, bias=False)
+        self.bn = nn.BatchNorm2d(8)
+        self.consumer = nn.Conv2d(8, 4, 1, bias=False)
+
+    def forward(self, image):
+        return self.consumer(self.bn(self.root(image)))
+
+
+class ResidualNet(nn.Module):
+    def __init__(self) -> None:
+        super().__init__()
+        self.branch_a = nn.Conv2d(3, 8, 1, bias=False)
+        self.branch_b = nn.Conv2d(8, 8, 1, bias=False)
+
+    def forward(self, image):
+        hidden = self.branch_a(image)
+        return hidden + self.branch_b(hidden)
 
 
 def test_l1_ranking_sums_absolute_filter_weights_and_breaks_ties_by_index():
@@ -147,3 +175,97 @@ def test_detect_contract_rejects_changed_class_output_width():
 
     with pytest.raises(ValueError, match="Detect contract changed"):
         validate_detect_contract(expected, model, changed)
+
+
+def test_sequential_group_allows_root_bn_and_downstream_input_changes():
+    model = SequentialNet().eval()
+
+    probe = validate_and_prune_unit(
+        model,
+        torch.randn(1, 3, 8, 8),
+        "root",
+        0.5,
+        baseline_contract=None,
+    )
+
+    assert probe.status == "VALID"
+    assert probe.original_channels == 8
+    assert probe.requested_pruned_channels == 4
+    assert probe.requested_remaining_channels == 4
+    assert probe.actual_remaining_channels == 4
+    assert probe.actual_pruning_ratio == 0.5
+    assert set(probe.touched_modules) >= {"root", "bn", "consumer"}
+    assert {operation.operation for operation in probe.operations} >= {
+        "prune_out_channels",
+        "prune_in_channels",
+    }
+    assert probe.model is model
+    assert model.consumer.in_channels == 4
+
+
+def test_structural_unit_probe_is_available_from_pruning_package():
+    model = SequentialNet().eval()
+
+    probe = public_validate_and_prune_unit(
+        model, torch.randn(1, 3, 8, 8), "root", 0.25, baseline_contract=None
+    )
+
+    assert probe.status == "VALID"
+
+
+def test_group_that_prunes_another_convolution_output_is_grouped_and_not_mutated():
+    model = ResidualNet().eval()
+    before = {
+        name: module.out_channels
+        for name, module in model.named_modules()
+        if isinstance(module, nn.Conv2d)
+    }
+
+    probe = validate_and_prune_unit(
+        model,
+        torch.randn(1, 3, 8, 8),
+        "branch_b",
+        0.25,
+        baseline_contract=None,
+    )
+
+    assert probe.status == "GROUPED"
+    assert "branch_a" in probe.touched_modules
+    assert probe.model is None
+    assert {
+        name: module.out_channels
+        for name, module in model.named_modules()
+        if isinstance(module, nn.Conv2d)
+    } == before
+
+
+def test_dependency_operations_serialize_deterministically():
+    operations = (
+        DependencyOperation(
+            module_name="root",
+            module_type="Conv2d",
+            operation="prune_out_channels",
+            indices=(0, 2),
+        ),
+    )
+
+    assert serialize_dependency_group(operations) == (
+        '[{"affected_count":2,"indices":[0,2],"module_name":"root",'
+        '"module_type":"Conv2d","operation":"prune_out_channels"}]'
+    )
+
+
+def test_single_channel_unit_is_invalid_without_building_a_pruning_group():
+    model = nn.Module()
+    model.root = nn.Conv2d(3, 1, 1)
+
+    probe = validate_and_prune_unit(
+        model,
+        torch.randn(1, 3, 8, 8),
+        "root",
+        0.5,
+        baseline_contract=None,
+    )
+
+    assert probe.status == "INVALID"
+    assert probe.reason == "insufficient_channels"
