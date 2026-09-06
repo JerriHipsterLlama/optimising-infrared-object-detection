@@ -163,6 +163,20 @@ python apps/single_layer_performance_screening.py --config configs/experiments/s
 
 Each configuration writes a resumable `results.csv` beneath `runs/experiments/single_layer_performance_screening/<model>/<hardware>/`. Its leading columns show the candidate, status, filters remaining, mAP50–95, and latency so progress can be inspected while the sweep runs. Latency is direct PyTorch CUDA forward latency on the named device; this sensitivity workflow deliberately produces no ONNX, TensorRT, or other deployment exports.
 
+### YOLOv8n structural-pruning accuracy sensitivity
+
+Run the standalone FP32 workstation screen with:
+
+```powershell
+.venv\Scripts\python.exe apps\yolov8_accuracy_sensitivity.py --config configs\experiments\yolov8n_accuracy_sensitivity.yaml
+```
+
+The tool evaluates the dense validation baseline, dynamically audits every convolution against the Torch-Pruning dependency graph, and tests independently valid units at ratios `0.125`, `0.25`, `0.375`, and `0.50`. Every `(unit, ratio)` reloads the original checkpoint, so pruning never accumulates. Mechanically dependent BN and downstream input channels may change, but a group that removes another meaningful convolution output is recorded as `GROUPED` and is not evaluated.
+
+The inspected four-class YOLOv8n checkpoint exposes 39 units that remain independent at all four ratios: 27 in the backbone/neck and 12 hidden convolutions in the Detect towers. Runtime discovery remains authoritative. Detect validation preserves the number of scales, prediction ranks and widths, class count, regression representation, and output metadata.
+
+Results are written incrementally to `results.csv`, with full dependency-group JSON, requested and achieved channel counts, validation metrics, accuracy degradation, and point sensitivity. `unit_sensitivity_ranking.csv` contains normalized degradation-AUC rankings for complete curves. Matching terminal rows resume without reevaluation; `ERROR` rows retry from a fresh dense checkpoint. No fine-tuning occurs, and no pruned candidate model is saved.
+
 ## Repository layout
 
 ```text

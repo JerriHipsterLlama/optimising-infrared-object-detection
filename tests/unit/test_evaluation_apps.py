@@ -40,6 +40,7 @@ def test_matrix_app_exposes_config_and_dry_run():
 
     assert result.returncode == 0, result.stderr
     assert "--config" in result.stdout
+    assert "--full-curve" not in result.stdout
     assert "--dry-run" in result.stdout
 
 
@@ -51,7 +52,34 @@ def test_single_layer_performance_app_exposes_config_only():
 
     assert result.returncode == 0, result.stderr
     assert "--config" in result.stdout
-    assert "--full-curve" not in result.stdout
+
+
+def test_accuracy_sensitivity_app_exposes_required_config_argument():
+    result = subprocess.run(
+        [sys.executable, "apps/yolov8_accuracy_sensitivity.py", "--help"],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0
+    assert "--config" in result.stdout
+
+
+def test_default_accuracy_sensitivity_config_uses_fp32_and_required_ratios():
+    root = Path(__file__).resolve().parents[2]
+    config = yaml.safe_load(
+        (root / "configs" / "experiments" / "yolov8n_accuracy_sensitivity.yaml").read_text(
+            encoding="utf-8"
+        )
+    )
+
+    assert config["model"]["checkpoint"] == "models/checkpoints/yolov8/train3/weights/best.pt"
+    assert config["data"] == {"dataset_yaml": "data/camel/camel.yaml", "split": "val"}
+    assert config["validation"]["half"] is False
+    assert config["validation"]["device"] == "0"
+    assert config["pruning"]["ratios"] == [0.125, 0.25, 0.375, 0.5]
+    assert config["pruning"]["importance"] == "l1"
 
 
 def test_single_layer_performance_app_passes_its_progress_function_as_on_result(monkeypatch, tmp_path):

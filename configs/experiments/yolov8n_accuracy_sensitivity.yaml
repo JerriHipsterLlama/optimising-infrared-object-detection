@@ -1,0 +1,20 @@
+model:
+  checkpoint: models/checkpoints/yolov8/train3/weights/best.pt
+data:
+  dataset_yaml: data/camel/camel.yaml
+  split: val
+validation:
+  imgsz: 352
+  batch: 1
+  device: "0"
+  half: false
+  conf: 0.25
+  iou: 0.6
+  workers: 0
+  rect: true
+pruning:
+  ratios: [0.125, 0.25, 0.375, 0.50]
+  importance: l1
+  example_image_size: 352
+experiment:
+  output_dir: runs/experiments/yolov8n_accuracy_sensitivity
