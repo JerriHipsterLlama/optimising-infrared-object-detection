@@ -119,6 +119,11 @@ class SensitivityAdapters:
                 1, 3, size, size, device=parameter.device, dtype=parameter.dtype
             )
 
+        def forward(model: nn.Module, example: torch.Tensor) -> Any:
+            model.eval()
+            with torch.inference_mode():
+                return model(example)
+
         def versions() -> Mapping[str, str]:
             import torch_pruning
             import ultralytics
@@ -136,7 +141,7 @@ class SensitivityAdapters:
             evaluate=evaluate,
             make_example_input=make_example,
             capture_contract=capture_detect_contract,
-            forward=lambda model, example: model.eval()(example),
+            forward=forward,
             versions=versions,
         )
 
@@ -150,6 +155,18 @@ class SensitivityAdapters:
     forward: Callable[[nn.Module, torch.Tensor], Any] | None = None
     probe: Callable[..., StructuralProbe] = validate_and_prune_unit
     versions: Callable[[], Mapping[str, str]] = lambda: {}
+
+
+def validate_yolov8n_model(model: nn.Module) -> None:
+    """Reject checkpoints that explicitly identify a non-nano YOLO scale."""
+
+    model_yaml = getattr(model, "yaml", None)
+    scale = model_yaml.get("scale") if isinstance(model_yaml, Mapping) else None
+    if scale is not None and str(scale).lower() != "n":
+        raise ValueError(
+            "Accuracy sensitivity screening requires a YOLOv8n checkpoint; "
+            f"the loaded model declares scale={scale!r}."
+        )
 
 
 def calculate_point_metrics(
@@ -426,6 +443,7 @@ def run_accuracy_sensitivity(
 
     baseline_wrapper = adapters.load_model(config.checkpoint)
     baseline_model = adapters.unwrap_model(baseline_wrapper)
+    validate_yolov8n_model(baseline_model)
     units = adapters.discover_units(baseline_model)
     baseline_example = adapters.make_example_input(baseline_model, config.example_image_size)
     baseline_contract = None
@@ -471,6 +489,7 @@ def run_accuracy_sensitivity(
             try:
                 wrapper = adapters.load_model(config.checkpoint)
                 dense_model = adapters.unwrap_model(wrapper)
+                validate_yolov8n_model(dense_model)
                 example = adapters.make_example_input(dense_model, config.example_image_size)
                 probe = adapters.probe(
                     dense_model,

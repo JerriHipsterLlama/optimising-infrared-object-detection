@@ -28,6 +28,7 @@ from infrared_detection.evaluation.accuracy_sensitivity import (
     load_sensitivity_config,
     normalized_degradation_auc,
     run_accuracy_sensitivity,
+    validate_yolov8n_model,
     write_artifacts,
 )
 
@@ -354,3 +355,26 @@ def test_default_adapters_return_ultralytics_box_metrics_and_forward_arguments(m
     assert metrics == ValidationMetrics(0.51, 0.72, 0.63, 0.64)
     assert calls == [{"data": "dataset.yaml", "half": False}]
     assert tuple(adapters.make_example_input(wrapper.model, 32).shape) == (1, 3, 32, 32)
+
+
+def test_yolov8n_validation_rejects_other_model_scales():
+    model = nn.Conv2d(3, 8, 1)
+    model.yaml = {"scale": "m"}
+
+    with pytest.raises(ValueError, match="YOLOv8n"):
+        validate_yolov8n_model(model)
+
+
+def test_default_forward_adapter_disables_gradients():
+    grad_enabled = []
+
+    class RecordingModel(nn.Conv2d):
+        def forward(self, inputs):
+            grad_enabled.append(torch.is_grad_enabled())
+            return super().forward(inputs)
+
+    model = RecordingModel(3, 8, 1)
+    output = SensitivityAdapters.defaults().forward(model, torch.randn(1, 3, 8, 8))
+
+    assert output.shape == (1, 8, 8, 8)
+    assert grad_enabled == [False]
