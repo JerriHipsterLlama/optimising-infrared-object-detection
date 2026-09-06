@@ -1,12 +1,23 @@
 from __future__ import annotations
 
+import csv
+import json
+from pathlib import Path
+
 import pytest
+import yaml
 
 from infrared_detection.evaluation.accuracy_sensitivity import (
+    AGGREGATE_FIELDS,
     DEFAULT_RATIOS,
+    DETAILED_FIELDS,
     build_unit_rankings,
     calculate_point_metrics,
+    experiment_fingerprint,
+    load_resume_artifacts,
+    load_sensitivity_config,
     normalized_degradation_auc,
+    write_artifacts,
 )
 
 
@@ -79,3 +90,103 @@ def test_rankings_sort_complete_curves_descending_and_leave_incomplete_unranked(
     assert incomplete["curve_status"] == "INCOMPLETE"
     assert incomplete["rank"] is None
     assert incomplete["normalized_auc_sensitivity"] is None
+
+
+def _write_config(tmp_path: Path, ratios=None, name="screening") -> Path:
+    checkpoint = tmp_path / "model.pt"
+    dataset = tmp_path / "dataset.yaml"
+    checkpoint.write_bytes(b"checkpoint")
+    dataset.write_text("path: images\n", encoding="utf-8")
+    path = tmp_path / f"{name}.yaml"
+    payload = {
+        "model": {"checkpoint": str(checkpoint)},
+        "data": {"dataset_yaml": str(dataset), "split": "val"},
+        "validation": {
+            "imgsz": 352,
+            "batch": 1,
+            "device": "cpu",
+            "half": False,
+            "conf": 0.25,
+            "iou": 0.6,
+            "workers": 0,
+        },
+        "pruning": {
+            "ratios": list(DEFAULT_RATIOS if ratios is None else ratios),
+            "importance": "l1",
+            "example_image_size": 352,
+        },
+        "experiment": {"output_dir": str(tmp_path / "artifacts")},
+    }
+    path.write_text(yaml.safe_dump(payload, sort_keys=False), encoding="utf-8")
+    return path
+
+
+def test_config_accepts_changeable_ratios_and_rejects_invalid_values(tmp_path):
+    config = load_sensitivity_config(_write_config(tmp_path))
+    assert config.ratios == DEFAULT_RATIOS
+    assert dict(config.validation)["half"] is False
+    assert load_sensitivity_config(
+        _write_config(tmp_path, ratios=[0.2, 0.4], name="custom")
+    ).ratios == (0.2, 0.4)
+
+    for index, invalid in enumerate(([0.25, 0.25], [0.0], [1.0], [])):
+        with pytest.raises(ValueError, match="ratio"):
+            load_sensitivity_config(_write_config(tmp_path, ratios=invalid, name=f"bad-{index}"))
+
+
+def _csv_header(path: Path) -> list[str]:
+    with path.open(newline="", encoding="utf-8") as handle:
+        return next(csv.reader(handle))
+
+
+def _manifest(fingerprint="abc") -> dict:
+    return {"fingerprint": fingerprint, "baseline": {"map50_95": 0.5}}
+
+
+def test_artifacts_write_required_csv_columns_and_manifest_atomically(tmp_path):
+    output = tmp_path / "artifacts"
+    rows = [
+        {"candidate_id": "baseline", "status": "BASELINE"},
+        {
+            "candidate_id": "unit-0.25",
+            "status": "COMPLETED",
+            "pruning_unit": "unit",
+            "dependency_group_json": [{"module_name": "unit"}],
+        },
+    ]
+    rankings = [{"rank": 1, "pruning_unit": "unit", "curve_status": "COMPLETE"}]
+
+    write_artifacts(output, rows, rankings, _manifest())
+
+    assert _csv_header(output / "results.csv") == list(DETAILED_FIELDS)
+    assert _csv_header(output / "unit_sensitivity_ranking.csv") == list(AGGREGATE_FIELDS)
+    assert json.loads((output / "manifest.json").read_text(encoding="utf-8"))["fingerprint"] == "abc"
+    assert not list(output.glob("*.tmp"))
+
+
+def test_resume_reuses_terminal_rows_retries_error_and_rejects_mismatch(tmp_path):
+    output = tmp_path / "artifacts"
+    rows = [
+        {"candidate_id": "a", "status": "COMPLETED"},
+        {"candidate_id": "b", "status": "GROUPED"},
+        {"candidate_id": "c", "status": "INVALID"},
+        {"candidate_id": "d", "status": "SEMANTICS_CHANGED"},
+        {"candidate_id": "e", "status": "ERROR"},
+    ]
+    write_artifacts(output, rows, [], _manifest())
+
+    state = load_resume_artifacts(output, expected_fingerprint="abc")
+
+    assert state.reusable_candidate_ids == {"a", "b", "c", "d"}
+    assert "e" not in state.reusable_candidate_ids
+    with pytest.raises(ValueError, match="fingerprint"):
+        load_resume_artifacts(output, expected_fingerprint="different")
+
+
+def test_experiment_fingerprint_changes_with_validation_or_input_metadata(tmp_path):
+    config = load_sensitivity_config(_write_config(tmp_path))
+    first = experiment_fingerprint(config, versions={"torch": "test"})
+    same = experiment_fingerprint(config, versions={"torch": "test"})
+    assert first == same
+    config.dataset_yaml.write_text("path: changed\n", encoding="utf-8")
+    assert first != experiment_fingerprint(config, versions={"torch": "test"})
