@@ -8,6 +8,26 @@ import torch
 from torch import nn
 
 
+def l1_filter_scores(module: nn.Conv2d) -> torch.Tensor:
+    """Return the L1 magnitude of each convolution output filter."""
+
+    if not isinstance(module, nn.Conv2d):
+        raise TypeError("L1 filter scoring requires torch.nn.Conv2d.")
+    return module.weight.detach().to(dtype=torch.float32).flatten(1).abs().sum(dim=1)
+
+
+def rank_output_channels(
+    module: nn.Conv2d,
+    criterion: str = "l1",
+) -> tuple[tuple[int, float], ...]:
+    """Rank dense-model output channels from least to most important."""
+
+    if criterion != "l1":
+        raise ValueError("Supported importance criteria: l1")
+    scores = l1_filter_scores(module).cpu().tolist()
+    return tuple(sorted(enumerate(scores), key=lambda item: (item[1], item[0])))
+
+
 def minimum_weight_scores(module: nn.Conv2d) -> torch.Tensor:
     if not isinstance(module, nn.Conv2d):
         raise TypeError("MinimumWeight scoring requires torch.nn.Conv2d.")
