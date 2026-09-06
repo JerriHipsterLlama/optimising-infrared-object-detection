@@ -146,6 +146,16 @@ def test_config_accepts_changeable_ratios_and_rejects_invalid_values(tmp_path):
             load_sensitivity_config(_write_config(tmp_path, ratios=invalid, name=f"bad-{index}"))
 
 
+def test_config_rejects_non_fp32_validation(tmp_path):
+    path = _write_config(tmp_path)
+    payload = yaml.safe_load(path.read_text(encoding="utf-8"))
+    payload["validation"]["half"] = True
+    path.write_text(yaml.safe_dump(payload, sort_keys=False), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="FP32"):
+        load_sensitivity_config(path)
+
+
 def _csv_header(path: Path) -> list[str]:
     with path.open(newline="", encoding="utf-8") as handle:
         return next(csv.reader(handle))
@@ -339,7 +349,7 @@ def test_default_adapters_return_ultralytics_box_metrics_and_forward_arguments(m
     class Wrapper:
         def __init__(self, checkpoint):
             self.checkpoint = checkpoint
-            self.model = nn.Conv2d(3, 8, 1)
+            self.model = nn.Conv2d(3, 8, 1).half()
 
         def val(self, **kwargs):
             calls.append(kwargs)
@@ -354,6 +364,7 @@ def test_default_adapters_return_ultralytics_box_metrics_and_forward_arguments(m
 
     assert metrics == ValidationMetrics(0.51, 0.72, 0.63, 0.64)
     assert calls == [{"data": "dataset.yaml", "half": False}]
+    assert wrapper.model.weight.dtype == torch.float32
     assert tuple(adapters.make_example_input(wrapper.model, 32).shape) == (1, 3, 32, 32)
 
 

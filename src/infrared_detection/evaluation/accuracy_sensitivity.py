@@ -101,7 +101,9 @@ class SensitivityAdapters:
             from ultralytics import YOLO
 
             _install_legacy_pathlib_checkpoint_compatibility()
-            return YOLO(str(checkpoint))
+            wrapper = YOLO(str(checkpoint))
+            wrapper.model.float()
+            return wrapper
 
         def evaluate(wrapper: Any, arguments: Mapping[str, Any]) -> ValidationMetrics:
             result = wrapper.val(**dict(arguments))
@@ -238,6 +240,9 @@ def load_sensitivity_config(config_path: str | Path) -> SensitivityConfig:
     validation = dict(payload.get("validation", {}))
     if not validation:
         raise ValueError("Validation settings must be provided.")
+    if bool(validation.get("half", False)):
+        raise ValueError("Accuracy sensitivity screening supports FP32 validation only.")
+    validation["half"] = False
     return SensitivityConfig(
         checkpoint=checkpoint,
         dataset_yaml=dataset,
