@@ -46,6 +46,17 @@ def test_forward_profiler_rejects_invalid_counts(kwargs):
         benchmark_pytorch_cuda_forward(nn.Identity(), torch.zeros(1), timer=FakeTimer([]), **kwargs)
 
 
+def test_forward_profiler_supports_cpu_production_timer():
+    result = benchmark_pytorch_cuda_forward(
+        nn.Identity(), torch.zeros(1), warmup=0, iterations=1
+    )
+
+    assert result["latency_mean_ms"] >= 0
+    assert result["latency_p50_ms"] >= 0
+    assert result["latency_p95_ms"] >= 0
+    assert result["fps"] is not None
+
+
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA GPU unavailable")
 def test_forward_profiler_uses_cuda_for_production_timer():
     result = benchmark_pytorch_cuda_forward(
