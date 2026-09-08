@@ -137,14 +137,14 @@ def _plot_metric(
     axis.spines["right"].set_visible(False)
     axis.legend(
         loc="upper center",
-        bbox_to_anchor=(0.5, -0.22),
+        bbox_to_anchor=(0.5, 0.02),
         frameon=False,
         fontsize=7,
         ncol=LEGEND_COLUMNS,
         title="Pruning layer",
         mode="expand",
     )
-    figure.tight_layout(rect=(0.0, 0.22, 1.0, 1.0))
+    figure.subplots_adjust(left=0.07, right=0.98, top=0.93, bottom=0.40)
     path = output / ("map50.png" if field == "map50" else "map50_95.png")
     figure.savefig(path, bbox_inches="tight")
     plt.close(figure)
@@ -207,7 +207,7 @@ def plot_accuracy_curves(results_csv: str | Path, output_dir: str | Path) -> dic
     axis.spines["right"].set_visible(False)
     layer_legend = axis.legend(
         loc="upper center",
-        bbox_to_anchor=(0.5, -0.20),
+        bbox_to_anchor=(0.5, 0.02),
         frameon=False,
         fontsize=6,
         ncol=LEGEND_COLUMNS,
@@ -220,7 +220,7 @@ def plot_accuracy_curves(results_csv: str | Path, output_dir: str | Path) -> dic
     axis.plot([], [], color="#202124", linestyle=COMBINED_LINESTYLES["map50"], label="mAP50")
     axis.plot([], [], color="#202124", linestyle=COMBINED_LINESTYLES["map50_95"], label="mAP50-95")
     axis.legend(loc="upper right", frameon=False, fontsize=8, title="Metric")
-    figure.tight_layout(rect=(0.0, 0.22, 1.0, 1.0))
+    figure.subplots_adjust(left=0.07, right=0.98, top=0.93, bottom=0.40)
     combined = output / "map50_and_map50_95.png"
     figure.savefig(combined, bbox_inches="tight")
     plt.close(figure)
