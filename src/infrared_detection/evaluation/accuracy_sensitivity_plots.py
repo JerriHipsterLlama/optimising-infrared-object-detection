@@ -113,7 +113,7 @@ def _plot_metric(
     ylabel: str,
     title: str,
 ) -> Path:
-    figure, axis = plt.subplots(figsize=(16, 10), dpi=180)
+    figure, axis = plt.subplots(figsize=(26, 10), dpi=180)
     colors = plt.colormaps["viridis"](np.linspace(0.05, 0.95, len(data.series)))
     for color, curve in zip(colors, data.series):
         axis.plot(
@@ -136,15 +136,14 @@ def _plot_metric(
     axis.spines["top"].set_visible(False)
     axis.spines["right"].set_visible(False)
     axis.legend(
-        loc="upper center",
-        bbox_to_anchor=(0.5, 0.02),
+        loc="center left",
+        bbox_to_anchor=(1.01, 0.5),
         frameon=False,
         fontsize=7,
-        ncol=LEGEND_COLUMNS,
+        ncol=2,
         title="Pruning layer",
-        mode="expand",
     )
-    figure.subplots_adjust(left=0.07, right=0.98, top=0.93, bottom=0.40)
+    figure.subplots_adjust(left=0.06, right=0.73, top=0.93, bottom=0.10)
     path = output / ("map50.png" if field == "map50" else "map50_95.png")
     figure.savefig(path, bbox_inches="tight")
     plt.close(figure)
@@ -174,7 +173,7 @@ def plot_accuracy_curves(results_csv: str | Path, output_dir: str | Path) -> dic
         ),
     }
 
-    figure, axis = plt.subplots(figsize=(20, 13), dpi=180)
+    figure, axis = plt.subplots(figsize=(26, 11), dpi=180)
     colors = plt.colormaps["viridis"](np.linspace(0.05, 0.95, len(data.series)))
     for color, curve in zip(colors, data.series):
         label = curve.name
@@ -206,13 +205,12 @@ def plot_accuracy_curves(results_csv: str | Path, output_dir: str | Path) -> dic
     axis.spines["top"].set_visible(False)
     axis.spines["right"].set_visible(False)
     layer_legend = axis.legend(
-        loc="upper center",
-        bbox_to_anchor=(0.5, 0.02),
+        loc="center left",
+        bbox_to_anchor=(1.01, 0.5),
         frameon=False,
         fontsize=6,
-        ncol=LEGEND_COLUMNS,
+        ncol=2,
         title="Pruning layer",
-        mode="expand",
         columnspacing=1.0,
         handlelength=1.8,
     )
@@ -220,7 +218,7 @@ def plot_accuracy_curves(results_csv: str | Path, output_dir: str | Path) -> dic
     axis.plot([], [], color="#202124", linestyle=COMBINED_LINESTYLES["map50"], label="mAP50")
     axis.plot([], [], color="#202124", linestyle=COMBINED_LINESTYLES["map50_95"], label="mAP50-95")
     axis.legend(loc="upper right", frameon=False, fontsize=8, title="Metric")
-    figure.subplots_adjust(left=0.07, right=0.98, top=0.93, bottom=0.40)
+    figure.subplots_adjust(left=0.06, right=0.73, top=0.93, bottom=0.10)
     combined = output / "map50_and_map50_95.png"
     figure.savefig(combined, bbox_inches="tight")
     plt.close(figure)
