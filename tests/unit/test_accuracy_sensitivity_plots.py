@@ -5,6 +5,7 @@ from pathlib import Path
 
 from infrared_detection.evaluation.accuracy_sensitivity_plots import (
     COMBINED_LINESTYLES,
+    SINGLE_LINESTYLES,
     load_plot_data,
     plot_accuracy_curves,
 )
@@ -56,3 +57,7 @@ def test_plot_accuracy_curves_writes_three_pngs(tmp_path: Path) -> None:
 
 def test_combined_plot_uses_dotted_map50_and_solid_map50_95() -> None:
     assert COMBINED_LINESTYLES == {"map50": ":", "map50_95": "-"}
+
+
+def test_single_metric_plots_are_solid() -> None:
+    assert SINGLE_LINESTYLES == {"map50": "-", "map50_95": "-"}

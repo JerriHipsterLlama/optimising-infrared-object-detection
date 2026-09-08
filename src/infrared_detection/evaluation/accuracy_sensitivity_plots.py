@@ -16,6 +16,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 
 COMBINED_LINESTYLES = {"map50": ":", "map50_95": "-"}
+SINGLE_LINESTYLES = {"map50": "-", "map50_95": "-"}
 
 
 @dataclass(frozen=True)
@@ -110,7 +111,6 @@ def _plot_metric(
     field: str,
     ylabel: str,
     title: str,
-    linestyle: str = "-",
 ) -> Path:
     figure, axis = plt.subplots(figsize=(16, 10), dpi=180)
     colors = plt.colormaps["viridis"](np.linspace(0.05, 0.95, len(data.series)))
@@ -123,7 +123,7 @@ def _plot_metric(
             marker="o",
             markersize=3.2,
             alpha=0.9,
-            linestyle=linestyle,
+            linestyle=SINGLE_LINESTYLES[field],
             label=f"{curve.name} ({curve.region})",
         )
     axis.set_title(title, color="#202124", pad=14)
@@ -169,7 +169,6 @@ def plot_accuracy_curves(results_csv: str | Path, output_dir: str | Path) -> dic
             field="map50_95",
             ylabel="mAP50-95",
             title="mAP50-95 by pruning layer",
-            linestyle=":",
         ),
     }
 
