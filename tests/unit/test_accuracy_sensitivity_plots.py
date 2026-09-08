@@ -5,6 +5,7 @@ from pathlib import Path
 
 from infrared_detection.evaluation.accuracy_sensitivity_plots import (
     COMBINED_LINESTYLES,
+    X_AXIS_RIGHT_PADDING_PERCENT,
     SINGLE_LINESTYLES,
     load_plot_data,
     plot_accuracy_curves,
@@ -61,3 +62,7 @@ def test_combined_plot_uses_dotted_map50_and_solid_map50_95() -> None:
 
 def test_single_metric_plots_are_solid() -> None:
     assert SINGLE_LINESTYLES == {"map50": "-", "map50_95": "-"}
+
+
+def test_x_axis_has_small_right_padding() -> None:
+    assert X_AXIS_RIGHT_PADDING_PERCENT == 1.0

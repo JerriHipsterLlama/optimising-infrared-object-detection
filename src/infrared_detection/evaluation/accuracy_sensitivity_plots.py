@@ -18,6 +18,7 @@ import numpy as np
 COMBINED_LINESTYLES = {"map50": ":", "map50_95": "-"}
 SINGLE_LINESTYLES = {"map50": "-", "map50_95": "-"}
 LEGEND_COLUMNS = 4
+X_AXIS_RIGHT_PADDING_PERCENT = 1.0
 
 
 @dataclass(frozen=True)
@@ -130,7 +131,8 @@ def _plot_metric(
     axis.set_title(title, color="#202124", pad=14)
     axis.set_xlabel("Achieved channel pruning / compression (%)")
     axis.set_ylabel(ylabel)
-    axis.set_xlim(left=0.0)
+    max_compression = max(max(curve.compression_percent) for curve in data.series)
+    axis.set_xlim(0.0, max_compression + X_AXIS_RIGHT_PADDING_PERCENT)
     axis.grid(True, color="#d9dde3", linewidth=0.7, alpha=0.75)
     axis.set_axisbelow(True)
     axis.spines["top"].set_visible(False)
@@ -199,7 +201,8 @@ def plot_accuracy_curves(results_csv: str | Path, output_dir: str | Path) -> dic
     axis.set_title("mAP50 and mAP50-95 by pruning layer", color="#202124", pad=14)
     axis.set_xlabel("Achieved channel pruning / compression (%)")
     axis.set_ylabel("Accuracy")
-    axis.set_xlim(left=0.0)
+    max_compression = max(max(curve.compression_percent) for curve in data.series)
+    axis.set_xlim(0.0, max_compression + X_AXIS_RIGHT_PADDING_PERCENT)
     axis.grid(True, color="#d9dde3", linewidth=0.7, alpha=0.75)
     axis.set_axisbelow(True)
     axis.spines["top"].set_visible(False)
