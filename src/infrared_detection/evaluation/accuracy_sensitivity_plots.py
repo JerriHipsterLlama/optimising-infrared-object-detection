@@ -13,6 +13,7 @@ import matplotlib
 
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+from matplotlib.lines import Line2D
 import numpy as np
 
 COMBINED_LINESTYLES = {"map50": ":", "map50_95": "-"}
@@ -229,9 +230,11 @@ def plot_accuracy_curves(results_csv: str | Path, output_dir: str | Path) -> dic
         columnspacing=1.0,
         handlelength=1.8,
     )
-    axis.plot([], [], color="#202124", linestyle=COMBINED_LINESTYLES["map50"], label="mAP50")
-    axis.plot([], [], color="#202124", linestyle=COMBINED_LINESTYLES["map50_95"], label="mAP50-95")
-    axis.legend(loc="upper right", frameon=False, fontsize=8, title="Metric")
+    metric_handles = [
+        Line2D([0], [0], color="#202124", linestyle=COMBINED_LINESTYLES["map50"], label="mAP50"),
+        Line2D([0], [0], color="#202124", linestyle=COMBINED_LINESTYLES["map50_95"], label="mAP50-95"),
+    ]
+    axis.legend(metric_handles, ["mAP50", "mAP50-95"], loc="upper right", frameon=False, fontsize=8, title="Metric")
     figure.subplots_adjust(left=0.06, right=0.98, top=0.93, bottom=0.10)
     combined = output / "map50_and_map50_95.png"
     figure.savefig(combined, bbox_inches="tight")
