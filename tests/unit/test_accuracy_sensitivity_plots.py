@@ -4,6 +4,7 @@ import csv
 from pathlib import Path
 
 from infrared_detection.evaluation.accuracy_sensitivity_plots import (
+    COMBINED_LINESTYLES,
     load_plot_data,
     plot_accuracy_curves,
 )
@@ -51,3 +52,7 @@ def test_plot_accuracy_curves_writes_three_pngs(tmp_path: Path) -> None:
 
     assert set(paths) == {"map50", "map50_95", "combined"}
     assert all(path.is_file() and path.stat().st_size > 0 for path in paths.values())
+
+
+def test_combined_plot_uses_dotted_map50_and_solid_map50_95() -> None:
+    assert COMBINED_LINESTYLES == {"map50": ":", "map50_95": "-"}

@@ -15,6 +15,8 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 
+COMBINED_LINESTYLES = {"map50": ":", "map50_95": "-"}
+
 
 @dataclass(frozen=True)
 class BaselineMetrics:
@@ -175,8 +177,25 @@ def plot_accuracy_curves(results_csv: str | Path, output_dir: str | Path) -> dic
     colors = plt.colormaps["viridis"](np.linspace(0.05, 0.95, len(data.series)))
     for color, curve in zip(colors, data.series):
         label = f"{curve.name} ({curve.region})"
-        axis.plot(curve.compression_percent, curve.map50, color=color, linewidth=1.3, marker="o", markersize=3.0, label=label)
-        axis.plot(curve.compression_percent, curve.map50_95, color=color, linewidth=1.3, marker="o", markersize=3.0, linestyle=":")
+        axis.plot(
+            curve.compression_percent,
+            curve.map50,
+            color=color,
+            linewidth=1.3,
+            marker="o",
+            markersize=3.0,
+            linestyle=COMBINED_LINESTYLES["map50"],
+            label=label,
+        )
+        axis.plot(
+            curve.compression_percent,
+            curve.map50_95,
+            color=color,
+            linewidth=1.3,
+            marker="o",
+            markersize=3.0,
+            linestyle=COMBINED_LINESTYLES["map50_95"],
+        )
     axis.set_title("mAP50 and mAP50-95 by pruning layer", color="#202124", pad=14)
     axis.set_xlabel("Achieved channel pruning / compression (%)")
     axis.set_ylabel("Accuracy")
@@ -187,8 +206,8 @@ def plot_accuracy_curves(results_csv: str | Path, output_dir: str | Path) -> dic
     axis.spines["right"].set_visible(False)
     layer_legend = axis.legend(loc="upper left", bbox_to_anchor=(1.01, 1.0), frameon=False, fontsize=7, ncol=2, title="Pruning layer")
     axis.add_artist(layer_legend)
-    axis.plot([], [], color="#202124", linestyle="-", label="mAP50")
-    axis.plot([], [], color="#202124", linestyle=":", label="mAP50-95")
+    axis.plot([], [], color="#202124", linestyle=COMBINED_LINESTYLES["map50"], label="mAP50")
+    axis.plot([], [], color="#202124", linestyle=COMBINED_LINESTYLES["map50_95"], label="mAP50-95")
     axis.legend(loc="lower left", bbox_to_anchor=(1.01, 0.0), frameon=False, fontsize=8, title="Metric")
     figure.tight_layout(rect=(0.0, 0.0, 0.78, 1.0))
     combined = output / "map50_and_map50_95.png"
