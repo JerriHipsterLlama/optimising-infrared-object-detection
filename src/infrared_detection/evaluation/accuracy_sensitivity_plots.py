@@ -17,6 +17,7 @@ import numpy as np
 
 COMBINED_LINESTYLES = {"map50": ":", "map50_95": "-"}
 SINGLE_LINESTYLES = {"map50": "-", "map50_95": "-"}
+LEGEND_COLUMNS = 4
 
 
 @dataclass(frozen=True)
@@ -124,7 +125,7 @@ def _plot_metric(
             markersize=3.2,
             alpha=0.9,
             linestyle=SINGLE_LINESTYLES[field],
-            label=f"{curve.name} ({curve.region})",
+            label=curve.name,
         )
     axis.set_title(title, color="#202124", pad=14)
     axis.set_xlabel("Achieved channel pruning / compression (%)")
@@ -139,7 +140,7 @@ def _plot_metric(
         bbox_to_anchor=(1.01, 1.0),
         frameon=False,
         fontsize=7,
-        ncol=2,
+        ncol=LEGEND_COLUMNS,
         title="Pruning layer",
     )
     figure.tight_layout(rect=(0.0, 0.0, 0.78, 1.0))
@@ -172,10 +173,10 @@ def plot_accuracy_curves(results_csv: str | Path, output_dir: str | Path) -> dic
         ),
     }
 
-    figure, axis = plt.subplots(figsize=(16, 10), dpi=180)
+    figure, axis = plt.subplots(figsize=(20, 11), dpi=180)
     colors = plt.colormaps["viridis"](np.linspace(0.05, 0.95, len(data.series)))
     for color, curve in zip(colors, data.series):
-        label = f"{curve.name} ({curve.region})"
+        label = curve.name
         axis.plot(
             curve.compression_percent,
             curve.map50,
@@ -203,7 +204,16 @@ def plot_accuracy_curves(results_csv: str | Path, output_dir: str | Path) -> dic
     axis.set_axisbelow(True)
     axis.spines["top"].set_visible(False)
     axis.spines["right"].set_visible(False)
-    layer_legend = axis.legend(loc="upper left", bbox_to_anchor=(1.01, 1.0), frameon=False, fontsize=7, ncol=2, title="Pruning layer")
+    layer_legend = axis.legend(
+        loc="upper left",
+        bbox_to_anchor=(1.01, 1.0),
+        frameon=False,
+        fontsize=6,
+        ncol=LEGEND_COLUMNS,
+        title="Pruning layer",
+        columnspacing=1.0,
+        handlelength=1.8,
+    )
     axis.add_artist(layer_legend)
     axis.plot([], [], color="#202124", linestyle=COMBINED_LINESTYLES["map50"], label="mAP50")
     axis.plot([], [], color="#202124", linestyle=COMBINED_LINESTYLES["map50_95"], label="mAP50-95")
