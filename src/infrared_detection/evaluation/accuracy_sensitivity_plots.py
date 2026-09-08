@@ -115,8 +115,8 @@ def _plot_metric(
     ylabel: str,
     title: str,
 ) -> Path:
-    figure = plt.figure(figsize=(24, 10), dpi=180)
-    grid = figure.add_gridspec(1, 2, width_ratios=(5.0, 2.2), wspace=0.04)
+    figure = plt.figure(figsize=(21, 10), dpi=180)
+    grid = figure.add_gridspec(1, 2, width_ratios=(6.0, 1.7), wspace=0.03)
     axis = figure.add_subplot(grid[0, 0])
     legend_axis = figure.add_subplot(grid[0, 1])
     legend_axis.axis("off")
@@ -184,8 +184,8 @@ def plot_accuracy_curves(results_csv: str | Path, output_dir: str | Path) -> dic
         ),
     }
 
-    figure = plt.figure(figsize=(24, 11), dpi=180)
-    grid = figure.add_gridspec(1, 2, width_ratios=(5.0, 2.2), wspace=0.04)
+    figure = plt.figure(figsize=(21, 11), dpi=180)
+    grid = figure.add_gridspec(1, 2, width_ratios=(6.0, 1.7), wspace=0.03)
     axis = figure.add_subplot(grid[0, 0])
     legend_axis = figure.add_subplot(grid[0, 1])
     legend_axis.axis("off")
