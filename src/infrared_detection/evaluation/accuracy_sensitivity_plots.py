@@ -232,11 +232,19 @@ def plot_accuracy_curves(results_csv: str | Path, output_dir: str | Path) -> dic
         columnspacing=0.8,
         handlelength=1.6,
     )
+    legend_axis.add_artist(layer_legend)
     metric_handles = [
         Line2D([0], [0], color="#202124", linestyle=COMBINED_LINESTYLES["map50"], label="mAP50"),
         Line2D([0], [0], color="#202124", linestyle=COMBINED_LINESTYLES["map50_95"], label="mAP50-95"),
     ]
-    axis.legend(metric_handles, ["mAP50", "mAP50-95"], loc="upper right", frameon=False, fontsize=8, title="Metric")
+    legend_axis.legend(
+        metric_handles,
+        ["mAP50", "mAP50-95"],
+        loc="lower left",
+        frameon=False,
+        fontsize=8,
+        title="Metric",
+    )
     figure.subplots_adjust(left=0.06, right=0.98, top=0.93, bottom=0.10)
     combined = output / "map50_and_map50_95.png"
     figure.savefig(combined, bbox_inches="tight")
