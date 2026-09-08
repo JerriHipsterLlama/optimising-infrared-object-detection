@@ -115,8 +115,8 @@ def _plot_metric(
     ylabel: str,
     title: str,
 ) -> Path:
-    figure = plt.figure(figsize=(26, 10), dpi=180)
-    grid = figure.add_gridspec(1, 2, width_ratios=(4.4, 1.8), wspace=0.04)
+    figure = plt.figure(figsize=(24, 10), dpi=180)
+    grid = figure.add_gridspec(1, 2, width_ratios=(5.0, 2.2), wspace=0.04)
     axis = figure.add_subplot(grid[0, 0])
     legend_axis = figure.add_subplot(grid[0, 1])
     legend_axis.axis("off")
@@ -146,11 +146,13 @@ def _plot_metric(
     legend_axis.legend(
         handles,
         labels,
-        loc="center left",
+        loc="upper left",
         frameon=False,
-        fontsize=7,
+        fontsize=8,
         ncol=2,
         title="Pruning layer",
+        columnspacing=0.8,
+        handlelength=1.6,
     )
     figure.subplots_adjust(left=0.06, right=0.98, top=0.93, bottom=0.10)
     path = output / ("map50.png" if field == "map50" else "map50_95.png")
@@ -182,8 +184,8 @@ def plot_accuracy_curves(results_csv: str | Path, output_dir: str | Path) -> dic
         ),
     }
 
-    figure = plt.figure(figsize=(26, 11), dpi=180)
-    grid = figure.add_gridspec(1, 2, width_ratios=(4.4, 1.8), wspace=0.04)
+    figure = plt.figure(figsize=(24, 11), dpi=180)
+    grid = figure.add_gridspec(1, 2, width_ratios=(5.0, 2.2), wspace=0.04)
     axis = figure.add_subplot(grid[0, 0])
     legend_axis = figure.add_subplot(grid[0, 1])
     legend_axis.axis("off")
@@ -222,13 +224,13 @@ def plot_accuracy_curves(results_csv: str | Path, output_dir: str | Path) -> dic
     layer_legend = legend_axis.legend(
         handles,
         labels,
-        loc="center left",
+        loc="upper left",
         frameon=False,
-        fontsize=6,
+        fontsize=8,
         ncol=2,
         title="Pruning layer",
-        columnspacing=1.0,
-        handlelength=1.8,
+        columnspacing=0.8,
+        handlelength=1.6,
     )
     metric_handles = [
         Line2D([0], [0], color="#202124", linestyle=COMBINED_LINESTYLES["map50"], label="mAP50"),
