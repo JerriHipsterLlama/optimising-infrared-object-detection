@@ -48,6 +48,9 @@ def compute_channel_importance(
     """Return one importance score per output channel/filter."""
 
     del graph
+    if criterion == "minimum_weight":
+        return {name: module.weight.detach().reshape(module.weight.shape[0], -1).square().mean(dim=1)
+                for name, module in model.named_modules() if isinstance(module, (nn.Conv2d, nn.Linear))}
     if criterion not in {"l1", "l2"}:
         raise ValueError("Supported channel importance criteria are 'l1' and 'l2'.")
     scores = {}

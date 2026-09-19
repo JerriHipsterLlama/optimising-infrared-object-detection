@@ -119,7 +119,7 @@ def build_pruned_checkpoint(
             planned_clusters[layer] = []
             skipped_layers.append(layer)
             continue
-        scores = compute_channel_importance(pruned_model, criterion="l1")
+        scores = compute_channel_importance(pruned_model, criterion=str(importance))
         if layer not in scores:
             raise ValueError(f"No channel-importance scores are available for prunable layer {layer!r}.")
         specs = plan_low_importance_clusters(
