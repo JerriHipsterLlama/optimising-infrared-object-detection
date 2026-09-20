@@ -625,6 +625,11 @@ def run_compression_matrix(
 
 
 def _export_checkpoint_to_onnx(checkpoint: Path, config: Mapping[str, Any], output_dir: Path) -> Path:
+    from infrared_detection.evaluation.single_layer_performance_screening import (
+        _install_legacy_pathlib_checkpoint_compatibility,
+    )
+
+    _install_legacy_pathlib_checkpoint_compatibility()
     from infrared_detection.export import export_yolo
 
     output_dir.mkdir(parents=True, exist_ok=True)
