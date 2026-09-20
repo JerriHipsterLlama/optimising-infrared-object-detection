@@ -38,6 +38,11 @@ def _validate_allowed_map_drop(value: Any, context: str) -> float:
 
 
 def _load_yolo_checkpoint(checkpoint_path: Path) -> Any:
+    from infrared_detection.evaluation.single_layer_performance_screening import (
+        _install_legacy_pathlib_checkpoint_compatibility,
+    )
+
+    _install_legacy_pathlib_checkpoint_compatibility()
     from ultralytics import YOLO
 
     return YOLO(str(checkpoint_path))
