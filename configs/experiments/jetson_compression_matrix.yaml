@@ -1,0 +1,49 @@
+model:
+  checkpoint: models/baseline/yolov8/train/weights/best.pt
+  architecture: yolov8n
+
+data:
+  dataset_yaml: data/camel/camel.yaml
+  calibration_image_dir: data/camel/images/train
+
+precisions: [fp32, fp16]
+
+pruning:
+  enabled: true
+  candidate_layers:
+    # Backbone
+    - model.4.m.1.cv1.conv
+    - model.5.conv
+    - model.6.m.0.cv1.conv
+    - model.6.m.1.cv1.conv
+    - model.7.conv
+    - model.8.cv2.conv
+    - model.8.m.0.cv1.conv
+    - model.9.cv2.conv
+    # Neck
+    - model.12.m.0.cv1.conv
+    - model.15.m.0.cv1.conv
+    - model.16.conv
+    - model.18.cv2.conv
+    - model.18.m.0.cv1.conv
+    - model.19.conv
+    - model.21.cv2.conv
+    - model.21.m.0.cv1.conv
+  cluster_size: 8
+  prune_ratios: [0.10, 0.20, 0.30, 0.40, 0.50]
+  allowed_map50_95_drop: 0.02
+  importance: minimum_weight
+
+experiment:
+  output_dir: runs/experiments/jetson_compression_matrix
+  image_size: 352
+  seed: 7
+
+runtime:
+  # Jetson Orin Nano GPU. TensorRT engines are built locally on the Jetson.
+  device: "0"
+  evaluation_device: "0"
+  workspace_mb: 1024
+  hardware_label: jetson_orin_nano
+  warmup: 20
+  iterations: 100
