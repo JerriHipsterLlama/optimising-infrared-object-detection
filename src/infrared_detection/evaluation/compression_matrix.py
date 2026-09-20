@@ -331,7 +331,9 @@ class CompressionMatrixAdapters:
             ),
             evaluate_engine=_evaluate_engine_accuracy,
             parameter_count=_checkpoint_parameter_count,
-            benchmark_engine=_benchmark_rtx_engine,
+            benchmark_engine=lambda engine, _device_label: _benchmark_rtx_engine(
+                engine, device_label=_hardware_label(config)
+            ),
         )
 
 
@@ -386,6 +388,12 @@ def _evaluation_device(config: Mapping[str, Any]) -> str:
     return str(value)
 
 
+def _hardware_label(config: Mapping[str, Any]) -> str:
+    runtime = config.get("runtime", {})
+    value = runtime.get("hardware_label", "rtx3070") if isinstance(runtime, Mapping) else "rtx3070"
+    return str(value)
+
+
 def _row_provenance(config_path: Path, checkpoint: Path, config: Mapping[str, Any]) -> dict[str, Any]:
     calibration_cache = _calibration_cache(config)
     return {
@@ -393,7 +401,7 @@ def _row_provenance(config_path: Path, checkpoint: Path, config: Mapping[str, An
         "dense_checkpoint": str(checkpoint.resolve()),
         "workspace_mb": _workspace_mb(config),
         "calibration_cache": str(calibration_cache.resolve()) if calibration_cache else None,
-        "device_label": "rtx3070",
+        "device_label": _hardware_label(config),
     }
 
 
@@ -578,8 +586,13 @@ def run_compression_matrix(
                 raise FileNotFoundError(f"TensorRT evaluation engine was not written: {evaluation_engine}")
             print(f"[compression-matrix] {row_index}/{total_rows} {variant_id}: evaluating detection accuracy", flush=True)
             metrics = dict(active.evaluate_engine(evaluation_engine, config, _evaluation_device(config)))
-            print(f"[compression-matrix] {row_index}/{total_rows} {variant_id}: benchmarking RTX 3070 latency", flush=True)
-            benchmark = dict(active.benchmark_engine(engine, "rtx3070"))
+            hardware_label = _hardware_label(config)
+            print(
+                f"[compression-matrix] {row_index}/{total_rows} {variant_id}: "
+                f"benchmarking {hardware_label} latency",
+                flush=True,
+            )
+            benchmark = dict(active.benchmark_engine(engine, hardware_label))
             _record_paths(row, variant_checkpoint, onnx, engine)
             row["evaluation_engine_path"] = str(evaluation_engine.resolve())
             row.update({key: value for key, value in metrics.items() if key != "precision"})
