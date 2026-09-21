@@ -45,5 +45,6 @@ runtime:
   evaluation_device: "0"
   workspace_mb: 1024
   hardware_label: jetson_orin_nano
+  native_fp16: true
   warmup: 20
   iterations: 100

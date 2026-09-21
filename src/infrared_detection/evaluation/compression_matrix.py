@@ -659,9 +659,27 @@ def _build_rtx_engine(
     )
 
     engine.parent.mkdir(parents=True, exist_ok=True)
-    prepared_onnx = onnx if precision == "fp32" else engine.parent / f"{onnx.stem}.{precision}.onnx"
-    preparation = prepare_tensorrt_precision_onnx(onnx, prepared_onnx, precision)
-    build = build_tensorrt_engine(prepared_onnx, engine, precision, calibration_cache, workspace_mb)
+    runtime = config.get("runtime", {})
+    native_fp16 = bool(runtime.get("native_fp16", False)) if isinstance(runtime, Mapping) else False
+    prepared_onnx = (
+        onnx
+        if precision == "fp32" or native_fp16
+        else engine.parent / f"{onnx.stem}.{precision}.onnx"
+    )
+    preparation = prepare_tensorrt_precision_onnx(
+        onnx,
+        prepared_onnx,
+        precision,
+        native_fp16=native_fp16,
+    )
+    build = build_tensorrt_engine(
+        prepared_onnx,
+        engine,
+        precision,
+        calibration_cache,
+        workspace_mb,
+        native_fp16=native_fp16,
+    )
     build["precision_preparation"] = preparation
     data = config.get("data")
     if not isinstance(data, Mapping) or not isinstance(data.get("dataset_yaml"), str):
