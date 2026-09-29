@@ -6,10 +6,10 @@ Keep four research capabilities while removing duplicated work and legacy paths:
 
 1. Model sensitivity screening to justify which YOLOv8n layers are selected.
 2. Filterwise/cluster-size screening to justify the selected cluster size.
-3. A compression matrix that structurally prunes candidates and exports portable ONNX models.
-4. A testing matrix that reads ONNX models from a configured directory and evaluates them against the configured dataset using Python, Jetson C++, or both.
+3. A compression matrix that structurally prunes candidates and produces FP32, FP16, and INT8 ONNX artifacts.
+4. A testing matrix that reads ONNX models from a configured directory, builds target-local TensorRT engines, and evaluates them against the configured dataset using Python, Jetson C++, or both.
 
-Keep model configuration and graph/dependency exports. The existing user changes in the RTX backend, its tests, and unrelated files are preserved.
+Keep the existing training scripts and their configs, model configuration, and graph/dependency exports. Training remains a distinct upstream workflow. The existing user changes in the RTX backend, its tests, and unrelated files are preserved.
 
 ## Current behavior and motivation
 
@@ -33,15 +33,17 @@ Remove the unrelated global-candidate/fine-tuning/winner-selection/Jetson-merge 
 
 ### 3. Compression matrix
 
-Make compression device-neutral. For the dense model and each configured pruning ratio, load the original checkpoint, apply the configured candidate layers, cluster size, and importance rule, then export one ONNX model per candidate. For the current five ratios this is six ONNX exports, not twelve precision-specific exports.
+Make compression device-neutral. For the dense model and each configured pruning ratio, load the original checkpoint, apply the configured candidate layers, cluster size, and importance rule, then export one FP32 ONNX source per candidate. From that source, use NVIDIA ModelOpt offline ONNX transforms to produce an FP16 ONNX variant and an INT8 Q/DQ ONNX variant. INT8 uses configured representative calibration data and records calibration settings/provenance. For the current five ratios this is six base exports and eighteen durable precision-specific ONNX artifacts (six candidates × three precisions).
 
-The compression stage does not build TensorRT engines, run dataset validation, benchmark latency, or apply FP16/INT8 conversion. Precision is a testing-matrix setting because TensorRT engines must be built on their target machine. Keep the source checkpoint and config provenance, candidate identity, pruning summary, ONNX path, and export errors in a compact manifest/CSV. Intermediate checkpoints may be temporary; ONNX is the durable candidate artifact.
+The compression stage does not build TensorRT engines, run validation, or benchmark latency. ModelOpt belongs here solely for precision conversion/quantization; it is not an engine builder. Cache/reuse artifacts when candidate and conversion/calibration config fingerprints match. A failure in one precision conversion is recorded for that candidate/precision and must not erase other completed variants. Keep source checkpoint and config provenance, candidate identity, pruning summary, precision, ONNX path, calibration provenance where applicable, and errors in a manifest/CSV. Intermediate checkpoints and base ONNX inputs may be retained for audit/reuse according to config; precision-specific ONNX files are durable outputs.
 
 Use deterministic candidate directories, for example:
 
 ```text
-<output_dir>/dense/model.onnx
-<output_dir>/cluster-8-ratio-0.1/model.onnx
+<output_dir>/dense/fp32/model.onnx
+<output_dir>/dense/fp16/model.onnx
+<output_dir>/dense/int8/model.onnx
+<output_dir>/cluster-8-ratio-0.1/{fp32,fp16,int8}/model.onnx
 ...
 <output_dir>/manifest.json
 <output_dir>/results.csv
@@ -52,10 +54,16 @@ Use deterministic candidate directories, for example:
 Add a config-driven command that reads a configured model directory and deterministic ONNX glob, with no hard-coded candidate list. It uses the configured dataset YAML, split, image size, thresholds, and device settings for every model and records one result row per model/backend/precision combination.
 
 - Python evaluation loads the ONNX model through the existing Ultralytics validation/metric-normalization path and reports mAP50, mAP50-95, precision, recall, and per-class AP. Python timing, when enabled, is labeled separately from device-native latency.
-- Jetson C++ evaluation builds a TensorRT engine locally from each ONNX model using the configured precision, then invokes the existing native runner against the dataset’s test-image directory. It reports native latency and runtime provenance. It does not claim C++-computed accuracy; raw-output decoding is outside this change.
+- Jetson C++ evaluation builds a TensorRT engine locally from each precision-specific ONNX model, then invokes the existing native runner against the dataset’s test-image directory. The standard `trtexec`/ONNX-parser route consumes ONNX, not a PyTorch `.pt` checkpoint; checkpoints must first be exported to ONNX. Torch-TensorRT is a separate PyTorch compilation route and is outside this design. It reports native latency and runtime provenance. It does not claim C++-computed accuracy; raw-output decoding is outside this change.
 - `both` runs Python quality evaluation and Jetson C++ performance evaluation and joins results by model identity. If only C++ is selected, quality metrics are explicitly unavailable rather than inferred.
 
 Failed exports, engine builds, Python evaluations, and C++ runs are recorded per row; a failure for one model does not erase completed rows for others. Output records the input ONNX path, backend, precision, dataset/split, commands, and device/runtime identity.
+
+TensorRT engines are target artifacts: RTX/Windows and Jetson/Linux each build locally from the same portable precision-specific ONNX files. Do not copy a serialized engine between these targets.
+
+### 5. Training workflows
+
+Preserve the existing training entrypoints, model-specific training scripts, configurations, and outputs. Training remains separate from sensitivity screening and compression: it produces the trained checkpoint consumed by those workflows. Do not introduce compression or distillation into training as part of this change. Focal and Global Knowledge Distillation are explicitly deferred until FP32/FP16/INT8 compression and testing are implemented.
 
 ## FCPTS removal
 
@@ -66,9 +74,9 @@ Keep the historical `archive/legacy_python` snapshot untouched: it is not import
 ## Configuration boundaries
 
 - Screening configs retain the trained model checkpoint, dataset, candidate layers, cluster-size probe values, validation settings, and output directory.
-- Compression config retains checkpoint, candidate layers, cluster size, prune ratios, image size, and ONNX output directory. It has no runtime device, precision matrix, TensorRT workspace, calibration, or benchmark settings.
-- Testing config owns `models.directory`, an ONNX glob, dataset/split, Python and/or Jetson C++ backend selection, TensorRT precision, and benchmark warm-up/iteration settings.
-- Existing YOLO model config, dataset config, and graph/dependency exports remain supported.
+- Compression config retains checkpoint, candidate layers, cluster size, prune ratios, image size, FP32/FP16/INT8 selection, ModelOpt conversion settings, INT8 calibration dataset/settings, cache behavior, and ONNX output directory. It has no runtime device, TensorRT workspace, validation, or benchmark settings. Calibration uses configured representative data and records its source; it must not silently use the held-out test split.
+- Testing config owns `models.directory`, an ONNX glob, dataset/split, Python and/or Jetson C++ backend selection, engine-build settings, and benchmark warm-up/iteration settings. Precision comes from each precision-specific ONNX artifact (validated metadata or filename/path convention); engine building must not silently convert a different precision.
+- Existing training scripts/configs, YOLO model config, dataset config, and graph/dependency exports remain supported.
 
 ## Alternatives considered
 
@@ -80,14 +88,16 @@ Keep the historical `archive/legacy_python` snapshot untouched: it is not import
 
 - The sensitivity workflow and its layer-ranking evidence remain runnable.
 - The filterwise screen directly compares configured cluster sizes on the selected layers and records comparable validation metrics.
-- Compression produces exactly one usable ONNX per dense/pruned candidate and does not call TensorRT, dataset evaluation, or benchmarking.
+- Compression produces FP32, FP16, and INT8 ONNX variants per dense/pruned candidate using ModelOpt for the offline precision transformations; it does not call TensorRT, dataset evaluation, or benchmarking.
 - The testing matrix discovers models from its configured directory, evaluates the configured dataset, and supports Python, Jetson C++, and combined modes with backend-appropriate metrics.
-- The current six-candidate/two-precision setup performs six compression exports; precision-specific engine builds and tests happen only in the testing matrix.
+- The current six-candidate/three-precision setup performs six base checkpoint-to-ONNX exports and produces up to eighteen precision-specific ONNX files. Precision-specific TensorRT engines are built locally from ONNX and tested only in the testing matrix.
 - Core structured-pruning imports no longer load FCPTS modules; no active CLI or package API advertises FCPTS.
-- Model and dataset configs plus graph/dependency exports remain available.
+- Existing training scripts/configs, model and dataset configs, and graph/dependency exports remain available.
 - Existing user edits are preserved, and historical result artifacts are not deleted.
 - Unit tests cover candidate planning/export count, directory discovery, per-row failure handling, config validation, backend metric separation, and FCPTS-free imports. Hardware acceptance is a short Jetson run after unit-level verification; no model or Jetson run is part of the design/spec phase.
 
 ## Deferred scope and dependency notes
 
-INT8/ModelOpt calibration, pruning fine-tuning, automated winner selection, historical artifact cleanup, and wholesale repository/requirements cleanup are not part of this change. Shared dependencies remain until the retained-workflow import audit proves they are unused. The RTX native-FP16 changes already present in the worktree are user changes and will not be overwritten; this design moves precision-specific builds to the testing stage without prescribing a change to those backend edits.
+Focal and Global Knowledge Distillation, pruning fine-tuning, automated winner selection, historical artifact cleanup, and wholesale repository/requirements cleanup are not part of this change. ModelOpt is an intentional scoped dependency for ONNX FP16 conversion and INT8 quantization; its compatibility with the existing YOLO export graph and target TensorRT parsers must be verified during implementation. Shared dependencies remain until the retained-workflow import audit proves they are unused. The RTX native-FP16 changes already present in the worktree are user changes and will not be overwritten; precision-specific engine construction moves to the testing stage.
+
+TensorRT's documented ONNX deployment workflow uses `trtexec --onnx=... --saveEngine=...`. TensorRT 11's strongly typed route consumes precision-encoded ONNX (including ModelOpt FP16 and INT8 Q/DQ exports) rather than relying on legacy `--fp16`/`--int8` switches. The target's installed TensorRT/JetPack version and ONNX operator/opset support remain authoritative at engine-build time.
