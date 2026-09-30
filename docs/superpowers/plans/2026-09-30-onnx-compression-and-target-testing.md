@@ -15,6 +15,7 @@
 ## Global Constraints
 
 - Preserve the approved 16 Backbone/Neck candidate layers, cluster size 8, and configured pruning ratios.
+- Consume the candidate layers established by sensitivity analysis and preserve the separate per-filter screening workflow; do not replace either screening stage with compression.
 - Produce FP32, FP16, and INT8 ONNX per candidate; six current candidates yield six base exports and up to eighteen precision ONNX artifacts.
 - Use ModelOpt for FP16 ONNX conversion and calibrated INT8 Q/DQ ONNX conversion; do not use TensorRT during compression.
 - Never use held-out test images for INT8 calibration; record calibration source and settings.

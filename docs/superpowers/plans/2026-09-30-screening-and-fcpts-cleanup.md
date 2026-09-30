@@ -2,9 +2,9 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Reduce cluster pruning to a direct, auditable cluster-size screen, remove active FCPTS code and public APIs, and preserve the sensitivity and training workflows.
+**Goal:** Preserve the sensitivity and filterwise screens, reduce cluster pruning to a direct cluster-size comparison, remove active FCPTS code and public APIs, and protect existing training workflows.
 
-**Architecture:** Keep the existing sensitivity-analysis pipeline and use the cluster workflow only for baseline plus configured structural probes over selected layers and cluster sizes. Remove global pruning, fine-tuning, winner selection, and Jetson-result merging from that path. Remove active FCPTS imports and code, while retaining the historical `archive/legacy_python` snapshot and all training entrypoints/configs.
+**Architecture:** Keep three distinct screening stages: model sensitivity provides evidence for candidate layers; `single_layer_performance_screening.py` keeps its per-filter ranking and one-filter-at-a-time accuracy/latency curves on those selected layers; the cluster workflow compares structural cluster sizes on the same layers. Remove global pruning, fine-tuning, winner selection, and Jetson-result merging only from the cluster-size workflow. Remove active FCPTS imports/code while retaining its historical archive and all training entrypoints/configs.
 
 **Tech Stack:** Python 3.10+, PyTorch, Ultralytics, YAML, pytest.
 
@@ -13,6 +13,7 @@
 ## Global Constraints
 
 - Preserve model sensitivity screening, including its layer-ranking evidence and graph/dependency exports.
+- Preserve `single_layer_performance_screening.py`, its app, configs, tests, per-filter rankings, and one-filter-at-a-time accuracy/latency curves; restrict the YOLOv8n RTX/Orin configs to sensitivity-approved candidate layers.
 - Compare configured cluster sizes on the configured candidate layers with dataset accuracy and a baseline.
 - Remove global-candidate, fine-tuning, winner-selection, and Jetson-merge stages from the cluster-screening path.
 - Remove active FCPTS implementation and public imports; do not remove shared dependencies unless retained-workflow imports prove them unused.
@@ -26,6 +27,7 @@
 - A baseline failure must mark dependent probes skipped without hiding the baseline error; pin in Task 1 workflow tests.
 - A failure in one layer/cluster probe must not prevent other configured probes from being recorded; pin in Task 1 workflow tests.
 - Removing FCPTS must not break imports of physical structured-pruning APIs; pin in Task 2 public-import tests.
+- The filterwise workflow must retain its exact per-filter ranking/K-1 curve behavior while targeting only the approved YOLOv8n layers; pin in Task 4 config and workflow tests.
 - Both training families and sensitivity CLI/configs must remain callable/present after cleanup; pin in Task 3 preservation tests.
 
 ---
@@ -46,7 +48,7 @@
 - [ ] **Step 1: Write failing tests** named `test_planned_rows_include_only_baseline_and_configured_probes`, `test_cluster_screening_records_each_layer_size_probe`, `test_baseline_failure_skips_all_probes`, `test_probe_failure_does_not_abort_remaining_rows`, and `test_invalid_screening_config_fails_before_loading_models`. Assert there are no `global` rows and probe rows preserve candidate layer, cluster size, accuracy, and structural-reduction fields.
 - [ ] **Step 2: Run the focused tests** with `python -m pytest tests/unit/test_cluster_workflow.py -q`; confirm the new tests fail against the old global/fine-tuning workflow.
 - [ ] **Step 3: Implement `ClusterScreeningAdapters` and `run_cluster_screening`** in `cluster_workflow.py`. Plan only a baseline plus the cartesian product of configured candidate layers, cluster sizes, and probe ratios; keep per-row failure isolation and the current manifest/CSV evidence. Remove global-pruning, fine-tuning, Orin selection, Jetson metric merge, and their unused adapter methods from this screen.
-- [ ] **Step 4: Update the CLI and canonical config.** Remove `--screen-only`; the command always runs the retained screening stage. Use the selected Backbone/Neck candidate layers from the approved compression config and keep cluster size 8 among the comparison values. Remove the obsolete duplicate config only after all retained settings have moved to the canonical config.
+- [ ] **Step 4: Update the CLI and canonical config.** Remove `--screen-only`; the command always runs the retained screening stage. Use the same sensitivity-approved Backbone/Neck candidate layers listed in Task 4 and the compression configs, and keep cluster size 8 among the comparison values. Remove the obsolete duplicate cluster config only after all retained settings have moved to the canonical config.
 - [ ] **Step 5: Run focused tests** with `python -m pytest tests/unit/test_cluster_workflow.py tests/unit/test_cluster_candidates.py tests/unit/test_cluster_probe.py -q`; all must pass, including the new failure-isolation cases.
 - [ ] **Step 6: Commit** the cluster-screening refactor separately.
 
@@ -90,26 +92,21 @@
 - [ ] **Step 4: Run preservation tests** with `python -m pytest tests/unit/test_training_entrypoints.py tests/unit/test_accuracy_sensitivity.py -q` and verify both entrypoints’ `--help` output without starting training.
 - [ ] **Step 5: Commit** the preservation tests and any strictly necessary shared-helper relocation separately.
 
-### Task 4: Keep reusable screening helpers without requiring a second performance workflow
+### Task 4: Preserve filterwise screening on the approved candidate layers
 
 **Files:**
-- Create: `src/infrared_detection/common/checkpoint_compatibility.py`
-- Modify: `src/infrared_detection/evaluation/accuracy_sensitivity.py`
-- Modify: `src/infrared_detection/evaluation/compression_matrix.py`
-- Modify as needed: `src/infrared_detection/evaluation/single_layer_performance_screening.py`
-- Modify: `src/infrared_detection/evaluation/cluster_workflow.py`
-- Remove: `apps/single_layer_performance_screening.py`
-- Remove: `configs/experiments/single_layer_performance_yolov8n_cpu.yaml`, `configs/experiments/single_layer_performance_yolov8n_rtx.yaml`, `configs/experiments/single_layer_performance_yolov8n_orin.yaml`, `configs/experiments/single_layer_performance_yolov8m_rtx.yaml`, `configs/experiments/single_layer_performance_yolov8m_orin.yaml`
+- Preserve unchanged: `src/infrared_detection/evaluation/single_layer_performance_screening.py`, `apps/single_layer_performance_screening.py`, `tests/unit/test_single_layer_performance_screening.py`
+- Modify: `configs/experiments/single_layer_performance_yolov8n_rtx.yaml`
+- Modify: `configs/experiments/single_layer_performance_yolov8n_orin.yaml`
+- Preserve unchanged: `configs/experiments/single_layer_performance_yolov8n_cpu.yaml`, `configs/experiments/single_layer_performance_yolov8m_rtx.yaml`, `configs/experiments/single_layer_performance_yolov8m_orin.yaml`
 - Test: `tests/unit/test_single_layer_performance_screening.py`, `tests/unit/test_cluster_workflow.py`
-- Test: create `tests/unit/test_checkpoint_compatibility.py`
 
 **Interfaces:**
-- Consumes: existing checkpoint-compatibility helper, filter-importance ranking, and dependency-aware structural-probe primitives.
-- Produces: `install_legacy_pathlib_checkpoint_compatibility() -> None` in the shared common module, imported by sensitivity/compression loaders; cluster-size screening remains the only required pruning-screen workflow while reusable filter-ranking/probe utilities remain available.
+- Consumes: `run_single_layer_performance_screening(config_path: str | Path, *, adapters: ScreeningAdapters | None = None, on_result: Callable[[dict[str, Any]], None] | None = None) -> list[dict[str, Any]]` and `resolve_layer_patterns(model, patterns)`.
+- Produces: the existing per-filter ranked K-1 curve remains available for sensitivity-approved YOLOv8n candidate layers; its rows continue to record layer, filter rank, removed/remaining counts, accuracy, latency, and structural status.
 
-- [ ] **Step 1: Add failing tests** named `test_legacy_pathlib_compatibility_is_shared_by_checkpoint_loaders` and `test_cluster_screening_primitives_remain_available`. Assert the Windows-checkpoint compatibility helper can be imported without loading the one-filter workflow, and physical ranking/probe helpers remain importable.
-- [ ] **Step 2: Run** `python -m pytest tests/unit/test_checkpoint_compatibility.py tests/unit/test_accuracy_sensitivity.py tests/unit/test_compression_matrix_workflow.py -q` to pin the current cross-module helper contract.
-- [ ] **Step 3: Move `install_legacy_pathlib_checkpoint_compatibility() -> None`** into `common/checkpoint_compatibility.py`; update the sensitivity and compression checkpoint-loading callers, and keep any direct standalone-screen caller working through the shared import.
-- [ ] **Step 4: Keep `single_layer_performance_screening.py` as an internal helper/tested module, but remove its standalone CLI and five experiment configs.** Remove references to that separate workflow from user-facing docs. Retain reusable ranking/probe helpers and historical result folders.
-- [ ] **Step 5: Run** `python -m pytest tests/unit/test_checkpoint_compatibility.py tests/unit/test_accuracy_sensitivity.py tests/unit/test_compression_matrix_workflow.py tests/unit/test_cluster_workflow.py tests/unit/test_cluster_probe.py tests/unit/test_cluster_selection.py -q`; all retained callers and probes must pass.
-- [ ] **Step 6: Commit** the workflow retirement/extraction independently.
+- [ ] **Step 1: Add failing tests** named `test_yolov8n_filterwise_configs_match_approved_candidates` and `test_filterwise_curve_keeps_per_filter_rows_for_selected_layers`. Assert the RTX/Orin configs select only the sixteen approved paths (backbone: `model.4.m.1.cv1.conv`, `model.5.conv`, `model.6.m.0.cv1.conv`, `model.6.m.1.cv1.conv`, `model.7.conv`, `model.8.cv2.conv`, `model.8.m.0.cv1.conv`, `model.9.cv2.conv`; neck: `model.12.m.0.cv1.conv`, `model.15.m.0.cv1.conv`, `model.16.conv`, `model.18.cv2.conv`, `model.18.m.0.cv1.conv`, `model.19.conv`, `model.21.cv2.conv`, `model.21.m.0.cv1.conv`) and retain one row per tested filter rank.
+- [ ] **Step 2: Run** `python -m pytest tests/unit/test_single_layer_performance_screening.py -q`; verify the config-scope test fails against the broad wildcard patterns while the existing K-1 curve behavior remains green.
+- [ ] **Step 3: Restrict only the YOLOv8n RTX/Orin `screening.layer_patterns`** to the approved candidate paths. Keep the implementation, CLI, resume/artifact behavior, tests, and CPU/YOLOv8m configs. The curve remains a per-filter ranking/accuracy/latency screen; cluster-size selection is answered by Task 1’s distinct cluster screen.
+- [ ] **Step 4: Run** `python -m pytest tests/unit/test_single_layer_performance_screening.py tests/unit/test_cluster_workflow.py tests/unit/test_accuracy_sensitivity.py -q`; confirm the filterwise module and the sensitivity-to-candidate workflow remain intact.
+- [ ] **Step 5: Commit** the candidate-layer scope update separately.
