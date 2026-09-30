@@ -115,7 +115,13 @@ def test_single_layer_performance_app_passes_its_progress_function_as_on_result(
 
 def test_single_layer_performance_configs_have_approved_values_and_isolated_outputs():
     root = Path(__file__).resolve().parents[2]
-    expected_patterns = [
+    expected_yolov8n_patterns = [
+        "model.4.m.1.cv1.conv", "model.5.conv", "model.6.m.0.cv1.conv", "model.6.m.1.cv1.conv",
+        "model.7.conv", "model.8.cv2.conv", "model.8.m.0.cv1.conv", "model.9.cv2.conv",
+        "model.12.m.0.cv1.conv", "model.15.m.0.cv1.conv", "model.16.conv", "model.18.cv2.conv",
+        "model.18.m.0.cv1.conv", "model.19.conv", "model.21.cv2.conv", "model.21.m.0.cv1.conv",
+    ]
+    expected_yolov8m_patterns = [
         "model.6.m.*.cv1.conv", "model.6.m.*.cv2.conv", "model.8.m.*.cv1.conv", "model.8.m.*.cv2.conv",
         "model.12.m.*.cv1.conv", "model.12.m.*.cv2.conv", "model.18.m.*.cv1.conv", "model.18.m.*.cv2.conv",
         "model.21.m.*.cv1.conv", "model.21.m.*.cv2.conv",
@@ -153,6 +159,7 @@ def test_single_layer_performance_configs_have_approved_values_and_isolated_outp
         assert config["runtime"] == {"device": "0", "precision": "fp32", "conf": 0.25, "iou": 0.6}
         assert config["screening"]["warmup"] == 20
         assert config["screening"]["iterations"] == 100
+        expected_patterns = expected_yolov8n_patterns if variant == "yolov8n" else expected_yolov8m_patterns
         assert config["screening"]["layer_patterns"] == expected_patterns
         output_dirs.add(config["experiment"]["output_dir"])
 
