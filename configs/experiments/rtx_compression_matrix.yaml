@@ -6,7 +6,7 @@ data:
   dataset_yaml: data/camel/camel.yaml
   calibration_image_dir: data/camel/images/train
 
-precisions: [fp32, fp16]
+precisions: [fp32, fp16, int8]
 
 pruning:
   enabled: true
@@ -38,9 +38,3 @@ experiment:
   output_dir: runs/experiments/rtx_compression_matrix
   image_size: 352
   seed: 7
-
-runtime:
-  device: rtx
-  # Ultralytics' TensorRT backend maps the CPU selector to CUDA for .engine files.
-  # This avoids the intermittent PyTorch numeric-device visibility failure on Windows.
-  evaluation_device: cpu

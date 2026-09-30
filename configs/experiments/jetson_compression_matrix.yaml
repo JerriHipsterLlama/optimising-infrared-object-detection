@@ -6,7 +6,7 @@ data:
   dataset_yaml: data/camel/camel.yaml
   calibration_image_dir: data/camel/images/train
 
-precisions: [fp32, fp16]
+precisions: [fp32, fp16, int8]
 
 pruning:
   enabled: true
@@ -38,13 +38,3 @@ experiment:
   output_dir: runs/experiments/jetson_compression_matrix
   image_size: 352
   seed: 7
-
-runtime:
-  # Jetson Orin Nano GPU. TensorRT engines are built locally on the Jetson.
-  device: "0"
-  evaluation_device: "0"
-  workspace_mb: 1024
-  hardware_label: jetson_orin_nano
-  native_fp16: true
-  warmup: 20
-  iterations: 100

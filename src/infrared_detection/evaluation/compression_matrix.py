@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import shutil
 from dataclasses import dataclass
 from pathlib import Path
@@ -239,9 +240,11 @@ def planned_variants(config: Mapping[str, Any]) -> list[dict[str, Any]]:
 
     rows: list[dict[str, Any]] = []
     for variant_name, prune_ratio in variant_specs:
+        candidate_id = variant_name
         for precision in precisions:
             row = {
                     "variant_id": f"{variant_name}-{precision}",
+                    "candidate_id": candidate_id,
                     "compression": "dense" if prune_ratio is None else "structured_pruning",
                     "precision": precision,
                     "prune_ratio": prune_ratio,
@@ -313,14 +316,11 @@ def write_compression_manifest(
 
 @dataclass
 class CompressionMatrixAdapters:
-    """Injectable side-effect boundary for local RTX matrix evaluations."""
+    """Injectable side-effect boundary for ONNX artifact generation."""
 
     build_pruned_checkpoint: Callable[[Mapping[str, Any], Path, float], Path]
     export_checkpoint: Callable[[Path, Mapping[str, Any], Path], Path]
-    build_engine: Callable[[Path, Path, str, Path | None, int], Mapping[str, Any]]
-    evaluate_engine: Callable[[Path, Mapping[str, Any], str], Mapping[str, Any]]
-    parameter_count: Callable[[Path], int]
-    benchmark_engine: Callable[[Path, str], Mapping[str, Any]]
+    convert_precision: Callable[[Path, str, Path, Mapping[str, Any]], Mapping[str, Any]]
 
     @classmethod
     def defaults(cls, config: Mapping[str, Any]) -> "CompressionMatrixAdapters":
@@ -331,14 +331,7 @@ class CompressionMatrixAdapters:
                 cfg, output_dir, requested_ratio=ratio
             ),
             export_checkpoint=_export_checkpoint_to_onnx,
-            build_engine=lambda onnx, engine, precision, calibration_cache, workspace_mb: _build_rtx_engine(
-                onnx, engine, precision, calibration_cache, workspace_mb, config
-            ),
-            evaluate_engine=_evaluate_engine_accuracy,
-            parameter_count=_checkpoint_parameter_count,
-            benchmark_engine=lambda engine, _device_label: _benchmark_rtx_engine(
-                engine, device_label=_hardware_label(config)
-            ),
+            convert_precision=_convert_precision_onnx,
         )
 
 
@@ -365,48 +358,17 @@ def _dense_checkpoint(config: Mapping[str, Any]) -> Path:
     return _resolve_repo_path(model["checkpoint"])
 
 
-def _calibration_cache(config: Mapping[str, Any]) -> Path | None:
-    runtime = config.get("runtime", {})
-    value = runtime.get("calibration_cache") if isinstance(runtime, Mapping) else None
-    if value is None:
-        return None
-    if not isinstance(value, str) or not value:
-        raise ValueError("runtime.calibration_cache must be a non-empty path when configured")
-    return _resolve_repo_path(value)
-
-
-def _workspace_mb(config: Mapping[str, Any]) -> int:
-    runtime = config.get("runtime", {})
-    value = runtime.get("workspace_mb", 1024) if isinstance(runtime, Mapping) else 1024
-    if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
-        raise ValueError("runtime.workspace_mb must be a positive integer")
-    return value
-
-
-def _evaluation_device(config: Mapping[str, Any]) -> str:
-    runtime = config.get("runtime", {})
-    value = runtime.get("evaluation_device", runtime.get("device", "0")) if isinstance(runtime, Mapping) else "0"
-    if value == "rtx":
-        value = "0"
-    if not isinstance(value, (str, int)) or isinstance(value, bool):
-        raise ValueError("runtime.evaluation_device must be '0', a CUDA device index, or 'cpu'")
-    return str(value)
-
-
-def _hardware_label(config: Mapping[str, Any]) -> str:
-    runtime = config.get("runtime", {})
-    value = runtime.get("hardware_label", "rtx3070") if isinstance(runtime, Mapping) else "rtx3070"
-    return str(value)
-
-
 def _row_provenance(config_path: Path, checkpoint: Path, config: Mapping[str, Any]) -> dict[str, Any]:
-    calibration_cache = _calibration_cache(config)
     return {
         "config_path": str(config_path.resolve()),
-        "dense_checkpoint": str(checkpoint.resolve()),
-        "workspace_mb": _workspace_mb(config),
-        "calibration_cache": str(calibration_cache.resolve()) if calibration_cache else None,
-        "device_label": _hardware_label(config),
+        "source_checkpoint": str(checkpoint.resolve()),
+        "config_fingerprint": hashlib.sha256(
+            json.dumps(
+                {key: value for key, value in config.items() if key != "_config_path"},
+                sort_keys=True,
+                default=str,
+            ).encode("utf-8")
+        ).hexdigest(),
     }
 
 
@@ -432,30 +394,13 @@ def _load_completed_rows(output_dir: Path, rows: list[Metrics]) -> list[Metrics]
 
 
 def _is_resumable_completed_row(saved: Mapping[str, Any], planned: Mapping[str, Any]) -> bool:
-    required = (
-        "checkpoint_path",
-        "onnx_path",
-        "engine_path",
-        "map50_95",
-        "parameter_count",
-        "latency_p50_ms",
-    )
-    return bool(
-        saved.get("status") == "completed"
-        and saved.get("provenance") == planned.get("provenance")
-        and all(saved.get(key) is not None for key in required)
-    )
-
-
-def _record_paths(row: Metrics, checkpoint: Path, onnx: Path | None = None, engine: Path | None = None) -> None:
-    row["checkpoint_path"] = str(checkpoint.resolve())
-    row["checkpoint_size_bytes"] = checkpoint.stat().st_size
-    if onnx is not None:
-        row["onnx_path"] = str(onnx.resolve())
-        row["onnx_size_bytes"] = onnx.stat().st_size
-    if engine is not None:
-        row["engine_path"] = str(engine.resolve())
-        row["engine_size_bytes"] = engine.stat().st_size
+    if saved.get("status") != "completed" or saved.get("provenance") != planned.get("provenance"):
+        return False
+    paths = (saved.get("base_onnx_path"), saved.get("onnx_path"))
+    if any(not isinstance(path, str) or not Path(path).is_file() for path in paths):
+        return False
+    checkpoint = saved.get("checkpoint_path")
+    return isinstance(checkpoint, str) and Path(checkpoint).is_file()
 
 
 def _failure(row: Metrics, exc: Exception) -> None:
@@ -463,46 +408,16 @@ def _failure(row: Metrics, exc: Exception) -> None:
     row["error"] = f"{type(exc).__name__}: {exc}"
 
 
-def _selected_candidate_id(rows: list[Metrics], allowed_drop: float) -> str | None:
-    baseline = next(
-        (
-            row
-            for row in rows
-            if row.get("compression") == "dense"
-            and row.get("precision") == "fp32"
-            and row.get("status") == "completed"
-            and row.get("map50_95") is not None
-        ),
-        None,
-    )
-    if baseline is None:
-        return None
-    candidates = [
-        row
-        for row in rows
-        if row.get("compression") == "structured_pruning"
-        and row.get("precision") == "fp32"
-        and row.get("status") == "completed"
-        and row.get("prune_ratio") is not None
-        and row.get("map50_95") is not None
-        and float(baseline["map50_95"]) - float(row["map50_95"]) <= allowed_drop
-    ]
-    if not candidates:
-        return None
-    return str(max(candidates, key=lambda row: float(row["prune_ratio"]))["variant_id"])
-
-
 def _write_matrix_artifacts(
     output_dir: Path, config_path: Path, config: Mapping[str, Any], rows: list[Metrics]
 ) -> None:
-    pruning = config.get("pruning", {})
-    allowed_drop = float(pruning.get("allowed_map50_95_drop", 0.0)) if isinstance(pruning, Mapping) else 0.0
     write_compression_manifest(
         output_dir,
         rows,
         metadata={
             "config_path": str(config_path.resolve()),
-            "selected_candidate_id": _selected_candidate_id(rows, allowed_drop),
+            "candidate_count": len({str(row["candidate_id"]) for row in rows}),
+            "precision_count": len(rows),
         },
         preserve_existing=False,
     )
@@ -534,7 +449,7 @@ def run_compression_matrix(
     dry_run: bool = False,
     adapters: CompressionMatrixAdapters | None = None,
 ) -> list[Metrics]:
-    """Run or plan the dense and structured-pruned RTX precision matrix."""
+    """Create one base ONNX export per candidate and convert its precisions."""
 
     config_file = Path(config_path).resolve()
     config = load_compression_config(config_file)
@@ -543,7 +458,12 @@ def run_compression_matrix(
     checkpoint = _dense_checkpoint(config)
     common_provenance = _row_provenance(config_file, checkpoint, config)
     for row in rows:
-        row["provenance"] = {**dict(row["provenance"]), **common_provenance}
+        row["provenance"] = {
+            **dict(row["provenance"]),
+            **common_provenance,
+            "candidate_id": row["candidate_id"],
+            "precision": row["precision"],
+        }
     if dry_run:
         _write_matrix_artifacts(output_dir, config_file, config, rows)
         return rows
@@ -552,75 +472,69 @@ def run_compression_matrix(
     rows = _load_completed_rows(output_dir, rows)
     cached_checkpoints: dict[float, Path] = {}
     ratio_failures: dict[float, Exception] = {}
-    total_rows = len(rows)
-    for row_index, row in enumerate(rows, start=1):
-        if row.get("status") == "completed":
-            if row.get("compression") == "structured_pruning":
-                saved = Path(str(row["checkpoint_path"]))
-                if saved.is_file():
-                    cached_checkpoints.setdefault(float(row["prune_ratio"]), saved)
-            continue
-        variant_id = str(row["variant_id"])
-        precision = str(row["precision"]).upper()
-        print(f"[compression-matrix] {row_index}/{total_rows} {variant_id}: preparing checkpoint", flush=True)
+    grouped: dict[str, list[Metrics]] = {}
+    for row in rows:
+        grouped.setdefault(str(row["candidate_id"]), []).append(row)
+
+    for candidate_id, candidate_rows in grouped.items():
+        completed_rows = [row for row in candidate_rows if row.get("status") == "completed"]
+        if completed_rows and candidate_rows[0]["compression"] == "structured_pruning":
+            saved_checkpoint = Path(str(completed_rows[0]["checkpoint_path"]))
+            cached_checkpoints.setdefault(float(candidate_rows[0]["prune_ratio"]), saved_checkpoint)
         try:
-            if row["compression"] == "dense":
+            if candidate_rows[0]["compression"] == "dense":
                 variant_checkpoint = checkpoint
             else:
                 variant_checkpoint = _pruned_checkpoint_for_row(
-                    row, config, output_dir, active, cached_checkpoints, ratio_failures
+                    candidate_rows[0], config, output_dir, active, cached_checkpoints, ratio_failures
                 )
-            variant_dir = output_dir / "variants" / str(row["variant_id"])
-            print(f"[compression-matrix] {row_index}/{total_rows} {variant_id}: exporting ONNX", flush=True)
-            onnx = Path(active.export_checkpoint(variant_checkpoint, config, variant_dir))
-            if not onnx.is_file():
-                raise FileNotFoundError(f"ONNX export was not written: {onnx}")
-            engine = variant_dir / "model.engine"
-            print(
-                f"[compression-matrix] {row_index}/{total_rows} {variant_id}: "
-                f"building {precision} TensorRT engine (this may be quiet for a while)",
-                flush=True,
+            candidate_dir = output_dir / candidate_id
+            reusable = next(
+                (row for row in completed_rows if Path(str(row.get("base_onnx_path", ""))).is_file()),
+                None,
             )
-            build = dict(
-                active.build_engine(onnx, engine, str(row["precision"]), _calibration_cache(config), _workspace_mb(config))
-            )
-            if not engine.is_file():
-                raise FileNotFoundError(f"TensorRT engine was not written: {engine}")
-            evaluation_engine = Path(str(build.get("evaluation_engine_path", engine)))
-            if not evaluation_engine.is_file():
-                raise FileNotFoundError(f"TensorRT evaluation engine was not written: {evaluation_engine}")
-            print(f"[compression-matrix] {row_index}/{total_rows} {variant_id}: evaluating detection accuracy", flush=True)
-            metrics = dict(active.evaluate_engine(evaluation_engine, config, _evaluation_device(config)))
-            hardware_label = _hardware_label(config)
-            print(
-                f"[compression-matrix] {row_index}/{total_rows} {variant_id}: "
-                f"benchmarking {hardware_label} latency",
-                flush=True,
-            )
-            benchmark = dict(active.benchmark_engine(engine, hardware_label))
-            _record_paths(row, variant_checkpoint, onnx, engine)
-            row["evaluation_engine_path"] = str(evaluation_engine.resolve())
-            row.update({key: value for key, value in metrics.items() if key != "precision"})
-            if "precision" in metrics:
-                row["detection_precision"] = metrics["precision"]
-            row.update(benchmark)
-            row["parameter_count"] = int(active.parameter_count(variant_checkpoint))
-            row["commands"] = {
-                "build": build.get("command"),
-                "benchmark": benchmark.get("command"),
-            }
-            row["cache_provenance"] = {
-                "calibration_cache": build.get("calibration_cache_provenance", common_provenance["calibration_cache"]),
-                "checkpoint": str(variant_checkpoint.resolve()),
-            }
-            row["status"] = "completed"
-            row["error"] = None
-            print(f"[compression-matrix] {row_index}/{total_rows} {variant_id}: completed", flush=True)
+            if reusable is not None:
+                source_onnx = Path(str(reusable["base_onnx_path"]))
+            else:
+                source_onnx = Path(active.export_checkpoint(variant_checkpoint, config, candidate_dir / "source"))
+                if not source_onnx.is_file():
+                    raise FileNotFoundError(f"Base ONNX export was not written: {source_onnx}")
         except Exception as exc:
-            _failure(row, exc)
-            print(f"[compression-matrix] {row_index}/{total_rows} {variant_id}: failed - {exc}", flush=True)
-        finally:
-            _write_matrix_artifacts(output_dir, config_file, config, rows)
+            for row in candidate_rows:
+                if row.get("status") != "completed":
+                    _failure(row, exc)
+                    _write_matrix_artifacts(output_dir, config_file, config, rows)
+            continue
+
+        for row in candidate_rows:
+            if row.get("status") == "completed":
+                continue
+            precision = str(row["precision"])
+            onnx = candidate_dir / precision / "model.onnx"
+            try:
+                conversion = dict(active.convert_precision(source_onnx, precision, onnx, config))
+                if not onnx.is_file():
+                    raise FileNotFoundError(f"Precision ONNX was not written: {onnx}")
+                row.update(
+                    {
+                        "checkpoint_path": str(variant_checkpoint.resolve()),
+                        "base_onnx_path": str(source_onnx.resolve()),
+                        "base_onnx_size_bytes": source_onnx.stat().st_size,
+                        "onnx_path": str(onnx.resolve()),
+                        "onnx_size_bytes": onnx.stat().st_size,
+                        "conversion": conversion,
+                        "status": "completed",
+                        "error": None,
+                    }
+                )
+                if row["compression"] == "structured_pruning":
+                    summary = variant_checkpoint.parent / "pruning_summary.json"
+                    if summary.is_file():
+                        row["pruning_summary_path"] = str(summary.resolve())
+            except Exception as exc:
+                _failure(row, exc)
+            finally:
+                _write_matrix_artifacts(output_dir, config_file, config, rows)
     return rows
 
 
@@ -642,100 +556,3 @@ def _export_checkpoint_to_onnx(checkpoint: Path, config: Mapping[str, Any], outp
     if exported.resolve() != isolated.resolve():
         shutil.copy2(exported, isolated)
     return isolated
-
-
-def _build_rtx_engine(
-    onnx: Path,
-    engine: Path,
-    precision: str,
-    calibration_cache: Path | None,
-    workspace_mb: int,
-    config: Mapping[str, Any],
-) -> Mapping[str, Any]:
-    from infrared_detection.benchmarking.rtx import (
-        build_tensorrt_engine,
-        prepare_tensorrt_precision_onnx,
-        write_ultralytics_engine_metadata,
-    )
-
-    engine.parent.mkdir(parents=True, exist_ok=True)
-    runtime = config.get("runtime", {})
-    native_fp16 = bool(runtime.get("native_fp16", False)) if isinstance(runtime, Mapping) else False
-    prepared_onnx = (
-        onnx
-        if precision == "fp32" or native_fp16
-        else engine.parent / f"{onnx.stem}.{precision}.onnx"
-    )
-    preparation = prepare_tensorrt_precision_onnx(
-        onnx,
-        prepared_onnx,
-        precision,
-        native_fp16=native_fp16,
-    )
-    build = build_tensorrt_engine(
-        prepared_onnx,
-        engine,
-        precision,
-        calibration_cache,
-        workspace_mb,
-        native_fp16=native_fp16,
-    )
-    build["precision_preparation"] = preparation
-    data = config.get("data")
-    if not isinstance(data, Mapping) or not isinstance(data.get("dataset_yaml"), str):
-        raise ValueError("Compression matrix requires data.dataset_yaml for engine metadata")
-    dataset_path = _resolve_repo_path(data["dataset_yaml"])
-    dataset = yaml.safe_load(dataset_path.read_text(encoding="utf-8")) or {}
-    names = dataset.get("names") if isinstance(dataset, Mapping) else None
-    if not isinstance(names, (list, dict)):
-        raise ValueError(f"Dataset YAML has no names list or mapping: {dataset_path}")
-    image_size = int(config.get("experiment", {}).get("image_size", 640))
-    metadata = {
-        "stride": 32,
-        "task": "detect",
-        "batch": 1,
-        "imgsz": [image_size, image_size],
-        "names": names,
-    }
-    evaluation_engine = engine.parent / "model.evaluation.engine"
-    build["evaluation_engine_path"] = write_ultralytics_engine_metadata(engine, evaluation_engine, metadata)
-    return build
-
-
-def _evaluate_engine_accuracy(
-    engine: Path, config: Mapping[str, Any], device: str
-) -> Mapping[str, Any]:
-    from infrared_detection.evaluation.detection_metrics import evaluate_yolo
-
-    data = config.get("data")
-    if not isinstance(data, Mapping) or not isinstance(data.get("dataset_yaml"), str):
-        raise ValueError("Compression matrix requires data.dataset_yaml")
-    runtime = config.get("runtime", {})
-    if device != "cpu":
-        import torch
-
-        if not torch.cuda.is_available() or torch.cuda.device_count() == 0:
-            raise RuntimeError(
-                f"Evaluation requested on CUDA device {device!r}, but PyTorch cannot see a CUDA device. "
-                "Check CUDA_VISIBLE_DEVICES and the installed PyTorch CUDA runtime."
-            )
-    wrapper = _load_yolo_checkpoint(engine)
-    return evaluate_yolo(
-        wrapper,
-        str(_resolve_repo_path(data["dataset_yaml"])),
-        "val",
-        int(config.get("experiment", {}).get("image_size", 640)),
-        device,
-        float(runtime.get("conf", 0.25)) if isinstance(runtime, Mapping) else 0.25,
-        float(runtime.get("iou", 0.6)) if isinstance(runtime, Mapping) else 0.6,
-    )
-
-
-def _checkpoint_parameter_count(checkpoint: Path) -> int:
-    return _parameter_count(_unwrap_model(_load_yolo_checkpoint(checkpoint)))
-
-
-def _benchmark_rtx_engine(engine: Path, device_label: str) -> Mapping[str, Any]:
-    from infrared_detection.benchmarking.rtx import benchmark_tensorrt_engine
-
-    return benchmark_tensorrt_engine(engine, device_label=device_label)

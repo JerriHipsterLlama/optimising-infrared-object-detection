@@ -1,4 +1,4 @@
-"""Run the local RTX compression precision matrix."""
+"""Create precision-specific ONNX artifacts for the compression matrix."""
 
 from __future__ import annotations
 
@@ -9,12 +9,12 @@ from pathlib import Path
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Evaluate dense and structured-pruned RTX precision variants.")
+    parser = argparse.ArgumentParser(description="Export dense and structured-pruned ONNX precision variants.")
     parser.add_argument("--config", type=Path, required=True, help="Compression-matrix YAML configuration.")
     parser.add_argument(
         "--dry-run",
         action="store_true",
-        help="Plan matrix rows without loading models or requiring TensorRT.",
+        help="Plan matrix rows without loading models or running precision conversion.",
     )
     args = parser.parse_args()
 

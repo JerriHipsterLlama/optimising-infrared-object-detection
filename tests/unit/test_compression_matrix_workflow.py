@@ -117,8 +117,8 @@ def test_rtx_config_declares_manual_cluster_pruning_contract():
     assert pruning["prune_ratios"] == [0.10, 0.20, 0.30, 0.40, 0.50]
     assert pruning["allowed_map50_95_drop"] == 0.02
     assert pruning["importance"] == "minimum_weight"
-    assert config["precisions"] == ["fp32", "fp16"]
-    assert config["runtime"]["evaluation_device"] == "cpu"
+    assert config["precisions"] == ["fp32", "fp16", "int8"]
+    assert "runtime" not in config
     assert config["experiment"]["image_size"] == 352
     assert planned_variants(config)[3]["provenance"] == {
         "candidate_layers": pruning["candidate_layers"],
