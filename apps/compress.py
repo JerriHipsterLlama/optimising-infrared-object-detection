@@ -89,7 +89,10 @@ def _load_channel_masks(path: Path) -> dict[str, Any]:
 def _prune(model: "nn.Module", config: Mapping[str, Any]) -> "nn.Module":
     backend = config.get("backend", "structured")
     if backend != "structured":
-        raise ValueError("Only the structured pruning backend is supported by compress(); use fcpts APIs directly.")
+        raise ValueError(
+            "Only physical dependency-aware structured pruning is supported by compress(); "
+            "use the structured pruning APIs."
+        )
 
     try:
         channel_masks = config["channel_masks"]
