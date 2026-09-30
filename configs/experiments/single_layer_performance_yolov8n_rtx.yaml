@@ -20,13 +20,21 @@ screening:
   warmup: 20
   iterations: 100
   layer_patterns:
-    - model.6.m.*.cv1.conv
-    - model.6.m.*.cv2.conv
-    - model.8.m.*.cv1.conv
-    - model.8.m.*.cv2.conv
-    - model.12.m.*.cv1.conv
-    - model.12.m.*.cv2.conv
-    - model.18.m.*.cv1.conv
-    - model.18.m.*.cv2.conv
-    - model.21.m.*.cv1.conv
-    - model.21.m.*.cv2.conv
+    # Backbone
+    - model.4.m.1.cv1.conv
+    - model.5.conv
+    - model.6.m.0.cv1.conv
+    - model.6.m.1.cv1.conv
+    - model.7.conv
+    - model.8.cv2.conv
+    - model.8.m.0.cv1.conv
+    - model.9.cv2.conv
+    # Neck
+    - model.12.m.0.cv1.conv
+    - model.15.m.0.cv1.conv
+    - model.16.conv
+    - model.18.cv2.conv
+    - model.18.m.0.cv1.conv
+    - model.19.conv
+    - model.21.cv2.conv
+    - model.21.m.0.cv1.conv
