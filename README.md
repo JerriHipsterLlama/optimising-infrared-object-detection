@@ -71,7 +71,15 @@ Use `--dry-run` to inspect the planned baseline and cluster probes without loadi
 
 ### RTX compression-matrix screening
 
-The local RTX workflow builds and evaluates dense and structured-pruned TensorRT variants. The pruning variants always start from the dense checkpoint; filterwise results are analysed manually to choose the cluster size and candidate layers before the matrix is run. The current matrix tests FP32 and FP16 at input size 352, the recommended candidate layers, cluster size 8, and the configured pruning ratios. INT8 is deferred while the TensorRT 11.1 ModelOpt workflow is developed.
+The compression matrix creates ONNX artifacts only; target-specific engine building and accuracy/latency testing are separate stages. Dense and structured-pruned candidates start from the dense checkpoint. The matrix writes FP32, FP16, and INT8 ONNX variants for input size 352, the approved candidate layers, cluster size 8, and configured pruning ratios.
+
+Install the optional NVIDIA ModelOpt dependencies in the active environment to enable FP16/INT8 conversion:
+
+```powershell
+python -m pip install -e ".[compression]"
+```
+
+FP32 conversion simply copies the exported graph. FP16 uses ModelOpt ONNX autocast; INT8 uses ModelOpt ONNX quantization with entropy calibration. The configured calibration images come from `data.calibration_image_dir` (currently the training split), are streamed in deterministic order, letterboxed to the ONNX input shape, converted BGR→RGB, and normalized to [0, 1]. The test split is rejected as a calibration source. Calibration settings are controlled by `quantization.calibration_method` and `quantization.calibration_samples`.
 
 Run a planning check first:
 
@@ -87,11 +95,9 @@ $env:PYTHONPATH="$PWD\\src"
 python apps/evaluate_compression_matrix.py --config configs/experiments/rtx_compression_matrix.yaml
 ```
 
-The run writes `manifest.json` and `results.csv` under `runs/experiments/rtx_compression_matrix/`. It records one row per precision and ratio, continues after individual failures, and selects the highest completed structured-pruning FP32 ratio within `pruning.allowed_map50_95_drop` of the dense FP32 baseline. RTX results are preliminary screening evidence; final deployment claims must be measured on the Jetson Orin Nano.
+The run writes ONNX files, `manifest.json`, and `results.csv` under `runs/experiments/rtx_compression_matrix/`. Each candidate has one shared source ONNX graph and deterministic per-precision output directories. Individual conversion failures are recorded without discarding successful sibling variants. Engine building, validation accuracy/recall, and latency are reported by the separate target-testing workflow, with final deployment claims measured on the Jetson Orin Nano.
 
-The compression-matrix `runtime.evaluation_device` is intentionally `cpu` for TensorRT engine validation on Windows. Ultralytics' TensorRT backend uses this selector to initialize the `.engine` on CUDA while avoiding intermittent PyTorch numeric-device visibility failures; latency is still measured with the raw TensorRT engine through `trtexec`.
-
-TensorRT 11.1 no longer accepts the legacy `trtexec --fp16`, `--int8`, and `--calib` flags. FP16 is prepared through the ModelOpt autocast boundary before engine building. INT8 is intentionally excluded from the current configuration and will require a separate ModelOpt calibration-data workflow.
+TensorRT 11.1 engine building consumes these ONNX graphs; TensorRT runtime precision flags are not a replacement for ONNX FP16/INT8 conversion. FP16 and INT8 ONNX preparation is performed through ModelOpt, independently from TensorRT engine construction.
 
 ### Single-layer performance-response screening
 

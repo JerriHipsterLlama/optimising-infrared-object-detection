@@ -8,6 +8,9 @@ version = "0.1.0"
 description = "Research package for infrared object detection"
 requires-python = ">=3.10"
 
+[project.optional-dependencies]
+compression = ["nvidia-modelopt[onnx]"]
+
 [tool.setuptools]
 package-dir = {"" = "src"}
 

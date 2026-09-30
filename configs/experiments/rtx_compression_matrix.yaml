@@ -8,6 +8,11 @@ data:
 
 precisions: [fp32, fp16, int8]
 
+quantization:
+  calibration_method: entropy
+  calibration_samples: 128
+  batch_size: 1
+
 pruning:
   enabled: true
   candidate_layers:

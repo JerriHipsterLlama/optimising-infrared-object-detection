@@ -556,3 +556,38 @@ def _export_checkpoint_to_onnx(checkpoint: Path, config: Mapping[str, Any], outp
     if exported.resolve() != isolated.resolve():
         shutil.copy2(exported, isolated)
     return isolated
+
+
+def _convert_precision_onnx(
+    source: Path, precision: str, output: Path, config: Mapping[str, Any]
+) -> Mapping[str, Any]:
+    from infrared_detection.compression.quantization.onnx_precision import (
+        calibration_reader_from_onnx,
+        prepare_precision_onnx,
+    )
+
+    quantization = config.get("quantization", {})
+    data = config.get("data", {})
+    if not isinstance(quantization, Mapping) or not isinstance(data, Mapping):
+        raise ValueError("quantization and data config sections must be mappings")
+    reader = None
+    calibration_method = str(quantization.get("calibration_method", "entropy")).lower()
+    if precision == "int8":
+        calibration_dir = data.get("calibration_image_dir")
+        if not isinstance(calibration_dir, str) or not calibration_dir:
+            raise ValueError("INT8 conversion requires data.calibration_image_dir")
+        calibration_split = data.get("calibration_split", data.get("split"))
+        reader = calibration_reader_from_onnx(
+            source,
+            _resolve_repo_path(calibration_dir),
+            sample_limit=int(quantization.get("calibration_samples", 128)),
+            batch_size=int(quantization.get("batch_size", 1)),
+            calibration_split=str(calibration_split) if calibration_split is not None else None,
+        )
+    return prepare_precision_onnx(
+        source,
+        output,
+        precision,
+        calibration_reader=reader,
+        calibration_method=calibration_method,
+    )
