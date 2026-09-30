@@ -1,0 +1,19 @@
+models:
+  directory: runs/experiments/jetson_compression_matrix
+  pattern: "**/model.onnx"
+
+testing:
+  backend: both
+  dataset_yaml: data/camel/camel.yaml
+  split: test
+  image_size: 352
+  device: "0"
+  confidence: 0.25
+  iou: 0.70
+  output_dir: runs/experiments/model_testing_matrix/jetson_orin_nano
+  hardware_label: jetson_orin_nano
+  workspace_mb: 1024
+  runner: build/jetson/jetson_benchmark
+  image_dir: data/camel/images/test
+  warmup: 20
+  iterations: 100

@@ -1,10 +1,8 @@
 models:
-  directory: runs/experiments/jetson_compression_matrix
+  directory: runs/experiments/rtx_compression_matrix
   pattern: "**/model.onnx"
 
 testing:
-  # Use "python" for RTX quality screening; use "both" on the Jetson for
-  # Python quality metrics plus native C++ TensorRT latency.
   backend: python
   dataset_yaml: data/camel/camel.yaml
   split: test

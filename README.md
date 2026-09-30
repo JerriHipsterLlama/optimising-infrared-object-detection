@@ -71,7 +71,7 @@ Use `--dry-run` to inspect the planned baseline and cluster probes without loadi
 
 ### RTX compression-matrix screening
 
-The compression matrix creates ONNX artifacts only; target-specific engine building and accuracy/latency testing are separate stages. Dense and structured-pruned candidates start from the dense checkpoint. The matrix writes FP32, FP16, and INT8 ONNX variants for input size 352, the approved candidate layers, cluster size 8, and configured pruning ratios.
+Compression creates ONNX artifacts only; engine building and testing are separate target-local stages. Dense and structured-pruned candidates start from the dense checkpoint. The matrix writes FP32, FP16, and INT8 ONNX variants for input size 352, the approved candidate layers, cluster size 8, and configured pruning ratios.
 
 Install the optional NVIDIA ModelOpt dependencies in the active environment to enable FP16/INT8 conversion:
 
@@ -95,9 +95,30 @@ $env:PYTHONPATH="$PWD\\src"
 python apps/evaluate_compression_matrix.py --config configs/experiments/rtx_compression_matrix.yaml
 ```
 
-The run writes ONNX files, `manifest.json`, and `results.csv` under `runs/experiments/rtx_compression_matrix/`. Each candidate has one shared source ONNX graph and deterministic per-precision output directories. Individual conversion failures are recorded without discarding successful sibling variants. Engine building, validation accuracy/recall, and latency are reported by the separate target-testing workflow, with final deployment claims measured on the Jetson Orin Nano.
+The run writes ONNX files, `manifest.json`, and `results.csv` under the configured output directory. Each candidate has one shared source ONNX graph and deterministic per-precision output directories. Individual conversion failures are recorded without discarding successful sibling variants.
 
-TensorRT 11.1 engine building consumes these ONNX graphs; TensorRT runtime precision flags are not a replacement for ONNX FP16/INT8 conversion. FP16 and INT8 ONNX preparation is performed through ModelOpt, independently from TensorRT engine construction.
+Run the RTX Python quality matrix against the test split with:
+
+```powershell
+$env:PYTHONPATH="$PWD\src"
+python apps/evaluate_model_testing_matrix.py --config configs/experiments/model_testing_matrix.yaml --dry-run
+python apps/evaluate_model_testing_matrix.py --config configs/experiments/model_testing_matrix.yaml
+```
+
+The Python backend records mAP50, mAP50-95, precision, recall, and per-class AP for each discovered precision ONNX. Precision is read from an `fp32`/`fp16`/`int8` directory, or from an exact legacy directory suffix such as `candidate-fp16`; ambiguous paths are rejected. External ONNX weight sidecars are checked and included in artifact provenance.
+
+For Jetson testing, copy the precision-specific ONNX artifact directory (and any referenced external-weight files) to the Jetson. Do not copy a TensorRT engine from Windows. Build the C++ runner and run the Jetson configuration on-device:
+
+```bash
+cmake --fresh -S deploy/jetson -B build/jetson -DCMAKE_BUILD_TYPE=Release \
+  -DCUDAToolkit_ROOT=/usr/local/cuda \
+  -DCMAKE_CUDA_COMPILER=/usr/local/cuda/bin/nvcc
+cmake --build build/jetson -j2
+python apps/evaluate_model_testing_matrix.py --config configs/experiments/jetson_model_testing_matrix.yaml --dry-run
+python apps/evaluate_model_testing_matrix.py --config configs/experiments/jetson_model_testing_matrix.yaml
+```
+
+The Jetson config runs both Python quality evaluation and the native C++ TensorRT latency runner. It builds each engine locally from its ONNX file under `runs/experiments/model_testing_matrix/jetson_orin_nano/`, then reports latency/runtime provenance separately from Python quality metrics. TensorRT receives strongly typed ONNX (`--stronglyTyped`); no `--fp16`, `--int8`, or calibration-cache flags are added because precision and INT8 Q/DQ calibration are already encoded in the ONNX artifact. These tests have not been run on Jetson hardware by this workflow; the on-device command is the acceptance run. Knowledge distillation remains out of scope.
 
 ### Single-layer performance-response screening
 

@@ -90,13 +90,22 @@ def discover_onnx_models(directory: Path, pattern: str) -> list[Path]:
 
 
 def _artifact_identity(path: Path) -> tuple[str, str]:
-    precision = path.parent.name.lower()
+    artifact_label = path.parent.name.lower()
+    if artifact_label in _PRECISIONS:
+        precision = artifact_label
+        candidate_id = path.parent.parent.name
+    else:
+        candidate_id, separator, precision = artifact_label.rpartition("-")
+        if not separator or precision not in _PRECISIONS:
+            precision = ""
+        else:
+            # Older compression runs stored one artifact per '<candidate>-<precision>' directory.
+            candidate_id = path.parent.name[: -(len(precision) + 1)]
     if precision not in _PRECISIONS:
         raise ValueError(
             f"Cannot determine a supported precision for ONNX artifact {path}; "
-            "expected its parent directory to be fp32, fp16, or int8"
+            "expected an fp32/fp16/int8 parent directory or an exact '<candidate>-<precision>' directory"
         )
-    candidate_id = path.parent.parent.name
     if not candidate_id or candidate_id in {".", ".."}:
         raise ValueError(f"Cannot determine candidate identity for ONNX artifact {path}")
     return candidate_id, precision
@@ -283,7 +292,6 @@ def run_model_testing_matrix(
     rows = planned_test_rows(config)
     output_dir = _resolve_path(config["testing"]["output_dir"])
     if dry_run:
-        _write_results(output_dir, config, rows)
         return rows
 
     active = adapters or ModelTestingMatrixAdapters.defaults()

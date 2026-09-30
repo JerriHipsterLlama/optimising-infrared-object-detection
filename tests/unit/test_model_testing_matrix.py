@@ -6,7 +6,9 @@ import pytest
 import yaml
 import onnx
 from onnx import TensorProto, helper
+import builtins
 
+from infrared_detection.evaluation.artifacts import write_experiment_manifest
 from infrared_detection.evaluation.model_testing_matrix import (
     ModelTestingMatrixAdapters,
     discover_onnx_models,
@@ -115,6 +117,26 @@ def test_ambiguous_precision_is_rejected(tmp_path):
 
     with pytest.raises(ValueError, match="precision"):
         planned_test_rows_from_path(config_path)
+
+
+def test_precision_suffix_is_accepted_as_explicit_legacy_metadata(tmp_path):
+    root = tmp_path / "legacy-artifacts"
+    legacy = root / "cluster-8-ratio-0.2-fp16" / "model.onnx"
+    legacy.parent.mkdir(parents=True)
+    graph_input = helper.make_tensor_value_info("images", TensorProto.FLOAT, [1, 3, 8, 8])
+    graph_output = helper.make_tensor_value_info("output", TensorProto.FLOAT, [1, 3, 8, 8])
+    node = helper.make_node("Identity", ["images"], ["output"])
+    onnx.save(helper.make_model(helper.make_graph([node], "legacy", [graph_input], [graph_output])), legacy)
+    config_path = _config(tmp_path)
+    config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    config["models"]["directory"] = str(root)
+    config_path.write_text(yaml.safe_dump(config), encoding="utf-8")
+
+    rows = planned_test_rows_from_path(config_path)
+
+    assert len(rows) == 1
+    assert rows[0]["candidate_id"] == "cluster-8-ratio-0.2"
+    assert rows[0]["precision"] == "fp16"
 
 
 def planned_test_rows_from_path(path: Path):
@@ -348,3 +370,41 @@ def test_empty_artifact_directory_is_a_configuration_error(tmp_path):
 
     with pytest.raises(ValueError, match="No ONNX artifacts matched"):
         planned_test_rows_from_path(config_path)
+
+
+def test_compression_manifest_artifacts_are_discoverable_by_testing_matrix(tmp_path, monkeypatch):
+    root = tmp_path / "compression-output"
+    manifest_rows = []
+    for candidate in ("dense", "cluster-8-ratio-0.1"):
+        for precision in ("fp32", "fp16", "int8"):
+            artifact = _artifact(root, candidate, precision)
+            manifest_rows.append(
+                {
+                    "variant_id": f"{candidate}-{precision}",
+                    "candidate_id": candidate,
+                    "precision": precision,
+                    "status": "completed",
+                    "onnx_path": str(artifact.resolve()),
+                }
+            )
+    write_experiment_manifest(root / "manifest.json", {"rows": manifest_rows})
+    config_path = _config(tmp_path)
+    testing_config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    testing_config["models"]["directory"] = str(root)
+    config_path.write_text(yaml.safe_dump(testing_config), encoding="utf-8")
+    forbidden_imports = {"modelopt", "tensorrt", "ultralytics", "torch"}
+    original_import = builtins.__import__
+
+    def guarded_import(name, *args, **kwargs):
+        if name.split(".", 1)[0] in forbidden_imports:
+            raise AssertionError(f"dry-run unexpectedly imported {name}")
+        return original_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", guarded_import)
+    rows = run_model_testing_matrix(config_path, dry_run=True)
+
+    assert len(rows) == 6
+    assert {row["candidate_id"] for row in rows} == {"dense", "cluster-8-ratio-0.1"}
+    assert {row["precision"] for row in rows} == {"fp32", "fp16", "int8"}
+    assert all(row["status"] == "planned" for row in rows)
+    assert not (tmp_path / "results").exists()
