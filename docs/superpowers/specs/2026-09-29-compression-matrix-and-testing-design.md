@@ -2,12 +2,13 @@
 
 ## Goal
 
-Keep four research capabilities while removing duplicated work and legacy paths:
+Keep five research capabilities while removing duplicated work and legacy paths:
 
 1. Model sensitivity screening to justify which YOLOv8n layers are selected.
-2. Filterwise/cluster-size screening to justify the selected cluster size.
-3. A compression matrix that structurally prunes candidates and produces FP32, FP16, and INT8 ONNX artifacts.
-4. A testing matrix that reads ONNX models from a configured directory, builds target-local TensorRT engines, and evaluates them against the configured dataset using Python, Jetson C++, or both.
+2. Filterwise screening on sensitivity-approved layers to record per-filter ranking and accuracy/latency curves.
+3. Cluster-size screening on the same candidate layers to justify the selected cluster size.
+4. A compression matrix that structurally prunes candidates and produces FP32, FP16, and INT8 ONNX artifacts.
+5. A testing matrix that reads ONNX models from a configured directory, builds target-local TensorRT engines, and evaluates them against the configured dataset using Python, Jetson C++, or both.
 
 Keep the existing training scripts and their configs, model configuration, and graph/dependency exports. Training remains a distinct upstream workflow. The existing user changes in the RTX backend, its tests, and unrelated files are preserved.
 
@@ -25,13 +26,17 @@ There is no standalone directory-driven model-testing matrix today. `cluster_wor
 
 Keep `apps/yolov8_accuracy_sensitivity.py`, its config, dependency-graph discovery, and detailed/ranking artifacts. Its independent structural probes remain the evidence for layer selection. Do not add TensorRT engine building or fine-tuning to this stage.
 
-### 2. Filterwise and cluster-size screening
+### 2. Filterwise screening on sensitivity-approved layers
 
-Keep one config-driven screening command whose retained purpose is to compare configured cluster sizes on the selected candidate layers using structural probes and dataset accuracy. Reuse the existing cluster selection, structural-pruning, model-loading, validation, and graph-export helpers. Preserve the baseline comparison and per-candidate metrics needed to justify the chosen size (currently 8).
+Preserve the implementation in `src/infrared_detection/evaluation/single_layer_performance_screening.py`, its `apps/single_layer_performance_screening.py` command, screening configs, and tests. This stage ranks filters within each selected layer and records the existing one-filter-at-a-time structural-pruning accuracy and latency curve. Its configured layer patterns must be restricted to the candidate layers accepted from the sensitivity-screening evidence; retain the rankings and per-candidate metrics as auditable outputs. Do not replace this filterwise workflow with cluster-size probes or remove it as a redundant command.
 
-Remove the unrelated global-candidate/fine-tuning/winner-selection/Jetson-merge stages from this screening path. The full one-filter-at-a-time performance sweep is not a second required workflow; its useful filter ranking and structural helpers remain available to the cluster-size screen where applicable. Historical result files are not deleted.
+### 3. Cluster-size screening
 
-### 3. Compression matrix
+Keep a separate config-driven screen that compares configured cluster sizes on the same sensitivity-approved candidate layers using structural probes and dataset accuracy. Reuse the existing cluster selection, structural-pruning, model-loading, validation, and graph-export helpers. Preserve the baseline comparison and per-candidate metrics needed to justify the chosen size (currently 8).
+
+Remove unrelated global-candidate/fine-tuning/winner-selection/Jetson-merge stages from the cluster-size screening path. The filterwise curve and cluster-size comparison answer different questions and both remain supported. Historical result files are not deleted.
+
+### 4. Compression matrix
 
 Make compression device-neutral. For the dense model and each configured pruning ratio, load the original checkpoint, apply the configured candidate layers, cluster size, and importance rule, then export one FP32 ONNX source per candidate. From that source, use NVIDIA ModelOpt offline ONNX transforms to produce an FP16 ONNX variant and an INT8 Q/DQ ONNX variant. INT8 uses configured representative calibration data and records calibration settings/provenance. For the current five ratios this is six base exports and eighteen durable precision-specific ONNX artifacts (six candidates × three precisions).
 
@@ -49,7 +54,7 @@ Use deterministic candidate directories, for example:
 <output_dir>/results.csv
 ```
 
-### 4. Model-testing matrix
+### 5. Model-testing matrix
 
 Add a config-driven command that reads a configured model directory and deterministic ONNX glob, with no hard-coded candidate list. It uses the configured dataset YAML, split, image size, thresholds, and device settings for every model and records one result row per model/backend/precision combination.
 
@@ -61,7 +66,7 @@ Failed exports, engine builds, Python evaluations, and C++ runs are recorded per
 
 TensorRT engines are target artifacts: RTX/Windows and Jetson/Linux each build locally from the same portable precision-specific ONNX files. Do not copy a serialized engine between these targets.
 
-### 5. Training workflows
+### 6. Training workflows
 
 Preserve the existing training entrypoints, model-specific training scripts, configurations, and outputs. Training remains separate from sensitivity screening and compression: it produces the trained checkpoint consumed by those workflows. Do not introduce compression or distillation into training as part of this change. Focal and Global Knowledge Distillation are explicitly deferred until FP32/FP16/INT8 compression and testing are implemented.
 
@@ -73,7 +78,7 @@ Keep the historical `archive/legacy_python` snapshot untouched: it is not import
 
 ## Configuration boundaries
 
-- Screening configs retain the trained model checkpoint, dataset, candidate layers, cluster-size probe values, validation settings, and output directory.
+- Sensitivity config retains its trained model checkpoint, dataset, candidate-unit screening settings, validation settings, and output directory. Filterwise config retains the checkpoint, dataset, sensitivity-approved layer patterns, runtime/latency settings, and output directory. Cluster-size screening config retains the checkpoint, dataset, sensitivity-approved candidate layers, cluster-size probe values, validation settings, and output directory.
 - Compression config retains checkpoint, candidate layers, cluster size, prune ratios, image size, FP32/FP16/INT8 selection, ModelOpt conversion settings, INT8 calibration dataset/settings, cache behavior, and ONNX output directory. It has no runtime device, TensorRT workspace, validation, or benchmark settings. Calibration uses configured representative data and records its source; it must not silently use the held-out test split.
 - Testing config owns `models.directory`, an ONNX glob, dataset/split, Python and/or Jetson C++ backend selection, engine-build settings, and benchmark warm-up/iteration settings. Precision comes from each precision-specific ONNX artifact (validated metadata or filename/path convention); engine building must not silently convert a different precision.
 - Existing training scripts/configs, YOLO model config, dataset config, and graph/dependency exports remain supported.
@@ -81,20 +86,21 @@ Keep the historical `archive/legacy_python` snapshot untouched: it is not import
 ## Alternatives considered
 
 - Keeping engine builds and testing inside compression preserves the current coupling and repeats ONNX export for each precision; rejected because it does not fix the requested runtime or Windows-to-Jetson handoff.
-- Rewriting all pruning and evaluation code from scratch risks losing verified dependency-graph and metric behavior; rejected in favor of reusing the existing primitives and deleting orchestration that is outside the four requested stages.
+- Rewriting all pruning and evaluation code from scratch risks losing verified dependency-graph and metric behavior; rejected in favor of reusing the existing primitives and deleting orchestration that is outside the requested screening and compression/testing stages.
 - Building TensorRT engines on Windows and transferring them to Jetson is not the default path; each target builds its own engine from portable ONNX.
 
 ## Acceptance criteria
 
-- The sensitivity workflow and its layer-ranking evidence remain runnable.
-- The filterwise screen directly compares configured cluster sizes on the selected layers and records comparable validation metrics.
+- Model sensitivity screening and its layer-ranking evidence remain runnable and continue to provide evidence for valid candidate layers.
+- The single-layer filterwise screen remains runnable with its per-filter rankings and one-filter-at-a-time accuracy/latency curves, restricted to the selected candidate layers.
+- The cluster-size screen directly compares configured sizes on those same candidate layers and records comparable validation metrics.
 - Compression produces FP32, FP16, and INT8 ONNX variants per dense/pruned candidate using ModelOpt for the offline precision transformations; it does not call TensorRT, dataset evaluation, or benchmarking.
 - The testing matrix discovers models from its configured directory, evaluates the configured dataset, and supports Python, Jetson C++, and combined modes with backend-appropriate metrics.
 - The current six-candidate/three-precision setup performs six base checkpoint-to-ONNX exports and produces up to eighteen precision-specific ONNX files. Precision-specific TensorRT engines are built locally from ONNX and tested only in the testing matrix.
 - Core structured-pruning imports no longer load FCPTS modules; no active CLI or package API advertises FCPTS.
 - Existing training scripts/configs, model and dataset configs, and graph/dependency exports remain available.
 - Existing user edits are preserved, and historical result artifacts are not deleted.
-- Unit tests cover candidate planning/export count, directory discovery, per-row failure handling, config validation, backend metric separation, and FCPTS-free imports. Hardware acceptance is a short Jetson run after unit-level verification; no model or Jetson run is part of the design/spec phase.
+- Unit tests cover candidate planning/export count, directory discovery, per-row failure handling, config validation, backend metric separation, FCPTS-free imports, and preservation of sensitivity, filterwise, and cluster-size screening. Hardware acceptance is a short Jetson run after unit-level verification; no model or Jetson run is part of the design/spec phase.
 
 ## Deferred scope and dependency notes
 
