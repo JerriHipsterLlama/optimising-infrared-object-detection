@@ -1,4 +1,4 @@
-"""Config-driven two-stage structural cluster-pruning evaluation."""
+"""Config-driven structural cluster-size screening."""
 
 from __future__ import annotations
 
@@ -79,6 +79,29 @@ class ClusterEvaluationAdapters:
             stats=_collect_stats,
             artifact_stats=_artifact_stats,
             validate_reduction=_validate_structural_reduction,
+        )
+
+
+@dataclass
+class ClusterScreeningAdapters:
+    """Model operations needed for the cluster-size accuracy screen."""
+
+    load_model: Callable[[Path], Any]
+    evaluate: Callable[[Any, Mapping[str, Any], str], Metrics]
+    safe_layers: Callable[[Any, Mapping[str, Any]], list[str]]
+    make_probe: Callable[[Any, str, int, float], Any]
+    stats: Callable[[Any], Metrics]
+
+    @classmethod
+    def defaults(cls, config: Mapping[str, Any]) -> "ClusterScreeningAdapters":
+        return cls(
+            load_model=_load_yolo,
+            evaluate=_evaluate_yolo,
+            safe_layers=_safe_layers,
+            make_probe=lambda model, layer, size, ratio: _structural_probe(
+                model, layer, size, ratio, config
+            ),
+            stats=_collect_stats,
         )
 
 
@@ -248,11 +271,33 @@ def _resolve_config(config_path: Path) -> tuple[dict[str, Any], Path, Path, Path
     return config, checkpoint, output_dir, Path(config["_config_path"])
 
 
-def _planned_rows(config: Mapping[str, Any]) -> list[Metrics]:
+def _validate_screening_config(config: Mapping[str, Any]) -> None:
+    pruning = config.get("pruning")
+    if not isinstance(pruning, Mapping):
+        raise ValueError("pruning must be a configuration mapping.")
+    layers = pruning.get("candidate_layers", pruning.get("safe_layers"))
+    if not isinstance(layers, list) or not layers or any(not isinstance(layer, str) or not layer.strip() for layer in layers):
+        raise ValueError("pruning.candidate_layers must be a non-empty list of layer paths.")
+    if len(set(layers)) != len(layers):
+        raise ValueError("pruning.candidate_layers must not contain duplicates.")
+    sizes = pruning.get("cluster_sizes")
+    if not isinstance(sizes, list) or not sizes or any(type(size) is not int or size <= 0 for size in sizes):
+        raise ValueError("pruning.cluster_sizes must be a non-empty list of positive integers.")
+    ratios = pruning.get("probe_ratios")
+    if not isinstance(ratios, list) or not ratios or any(
+        isinstance(ratio, bool) or not isinstance(ratio, (int, float)) or not 0 < ratio < 1
+        for ratio in ratios
+    ):
+        raise ValueError("pruning.probe_ratios must be a non-empty list of values between 0 and 1.")
+
+
+def _planned_rows(config: Mapping[str, Any], *, include_global: bool = True) -> list[Metrics]:
+    _validate_screening_config(config)
     pruning = config["pruning"]
+    layers = pruning.get("candidate_layers", pruning.get("safe_layers"))
     rows: list[Metrics] = []
     _append_row(rows, _base_row("baseline", "baseline", ratio=0.0))
-    for layer in pruning["safe_layers"]:
+    for layer in layers:
         for size in pruning["cluster_sizes"]:
             for ratio in pruning["probe_ratios"]:
                 _append_row(
@@ -265,9 +310,18 @@ def _planned_rows(config: Mapping[str, Any]) -> list[Metrics]:
                         layer,
                     ),
                 )
-    for size in pruning["cluster_sizes"]:
-        for ratio in pruning["global_ratios"]:
-            _append_row(rows, _base_row(_candidate_id("global", cluster_size=int(size), ratio=float(ratio)), "global", int(size), float(ratio)))
+    if include_global and "global_ratios" in pruning:
+        for size in pruning["cluster_sizes"]:
+            for ratio in pruning["global_ratios"]:
+                _append_row(
+                    rows,
+                    _base_row(
+                        _candidate_id("global", cluster_size=int(size), ratio=float(ratio)),
+                        "global",
+                        int(size),
+                        float(ratio),
+                    ),
+                )
     return rows
 
 
@@ -497,6 +551,85 @@ def run_cluster_evaluation(
     return rows
 
 
+def _write_screening_artifacts(output_dir: Path, config_path: Path, rows: list[Metrics]) -> None:
+    write_metrics_csv(output_dir / "candidates.csv", rows)
+    write_experiment_manifest(
+        output_dir / "manifest.json",
+        {
+            "config_path": str(config_path),
+            "candidate_count": len(rows),
+            "candidate_ids": [row["candidate_id"] for row in rows],
+            "rows": rows,
+        },
+    )
+
+
+def run_cluster_screening(
+    config_path: str | Path,
+    dry_run: bool = False,
+    adapters: ClusterScreeningAdapters | None = None,
+) -> list[Metrics]:
+    """Compare configured cluster sizes on sensitivity-approved layers."""
+
+    config, checkpoint, output_dir, resolved_config_path = _resolve_config(Path(config_path))
+    _validate_screening_config(config)
+    rows = _planned_rows(config, include_global=False)
+    if dry_run:
+        _write_screening_artifacts(output_dir, resolved_config_path, rows)
+        return rows
+
+    active = adapters or ClusterScreeningAdapters.defaults(config)
+    device = str(config["runtime"]["device"])
+    baseline = rows[0]
+    try:
+        baseline_model = active.load_model(checkpoint)
+        baseline_metrics = active.evaluate(baseline_model, config, device)
+        baseline_stats = active.stats(baseline_model)
+        _metrics_row(baseline, baseline_metrics, baseline_stats)
+        baseline["status"] = "completed"
+    except Exception as exc:
+        _failure(baseline, exc)
+        for row in rows[1:]:
+            _skip(row, f"Skipped because baseline failed: {baseline['error']}")
+        _write_screening_artifacts(output_dir, resolved_config_path, rows)
+        return rows
+
+    try:
+        valid_layers = set(active.safe_layers(baseline_model, config))
+    except Exception as exc:
+        for row in rows[1:]:
+            _skip(row, f"Skipped because candidate-layer screening failed: {type(exc).__name__}: {exc}")
+        _write_screening_artifacts(output_dir, resolved_config_path, rows)
+        return rows
+
+    for row in rows[1:]:
+        layer = str(row["layer"])
+        if layer not in valid_layers:
+            _skip(row, f"Candidate layer {layer!r} is not structurally prunable.")
+            continue
+        try:
+            model = active.load_model(checkpoint)
+            candidate = active.make_probe(
+                model,
+                layer,
+                int(row["cluster_size"]),
+                float(row["prune_ratio"]),
+            )
+            metrics = active.evaluate(candidate, config, device)
+            stats = active.stats(candidate)
+            _metrics_row(row, metrics, stats, baseline)
+            baseline_parameters = baseline.get("parameter_count")
+            candidate_parameters = row.get("parameter_count")
+            if baseline_parameters and candidate_parameters is not None:
+                row["parameter_count_reduction"] = 1.0 - float(candidate_parameters) / float(baseline_parameters)
+            row["status"] = "completed"
+        except Exception as exc:
+            _failure(row, exc)
+
+    _write_screening_artifacts(output_dir, resolved_config_path, rows)
+    return rows
+
+
 def _unwrap_model(model: Any) -> Any:
     return getattr(model, "model", model)
 
@@ -527,7 +660,7 @@ def _safe_layers(model: Any, config: Mapping[str, Any]) -> list[str]:
 
     unwrapped = _unwrap_model(model)
     modules = dict(unwrapped.named_modules())
-    configured = config["pruning"].get("safe_layers")
+    configured = config["pruning"].get("candidate_layers", config["pruning"].get("safe_layers"))
     if configured:
         protected = set(config["pruning"]["protected_layers"])
         safe = []

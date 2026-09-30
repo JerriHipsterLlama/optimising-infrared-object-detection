@@ -94,26 +94,14 @@ def _write_fixture_export(output_dir: Path) -> Path:
     return artifact
 
 
-def test_dry_run_emits_baseline_probe_and_global_manifest(tmp_path):
-    rows = run_cluster_evaluation(write_config(tmp_path), dry_run=True)
+def test_dry_run_emits_baseline_and_cluster_probe_manifest(tmp_path):
+    rows = cluster_workflow.run_cluster_screening(write_config(tmp_path), dry_run=True)
 
-    assert [row["stage"] for row in rows] == ["baseline", "probe", "probe", "global", "global"]
+    assert [row["stage"] for row in rows] == ["baseline", "probe", "probe"]
     assert all("candidate_id" in row for row in rows)
     assert len({row["candidate_id"] for row in rows}) == len(rows)
     assert (tmp_path / "artifacts" / "candidates.csv").exists()
     assert (tmp_path / "artifacts" / "manifest.json").exists()
-
-
-def test_legacy_filterwise_workflow_and_repository_artifacts_are_removed():
-    root = Path(__file__).resolve().parents[2]
-
-    assert not hasattr(cluster_workflow, "run_filterwise_evaluation")
-    assert not (root / "configs" / "experiments" / "filterwise_rtx_screening.yaml").exists()
-    assert not (root / "tools" / "build_kaggle_filterwise_notebook.py").exists()
-    assert not (root / "tests" / "unit" / "test_build_kaggle_filterwise_notebook.py").exists()
-    readme = (root / "README.md").read_text(encoding="utf-8")
-    assert "single_layer_performance_screening.py" in readme
-    assert "kaggle_filterwise_sensitivity.ipynb" not in readme
 
 
 def test_channel_importance_uses_physical_conv_weight_width_when_metadata_is_stale():
@@ -127,25 +115,8 @@ def test_channel_importance_uses_physical_conv_weight_width_when_metadata_is_sta
     assert scores[""] .shape == (4,)
 
 
-def test_screen_only_uses_rtx_and_skips_global_candidates(tmp_path, adapters):
-    config_path = write_config(tmp_path)
-    evaluated_devices = []
-
-    def evaluate(model, config, device):
-        del model, config
-        evaluated_devices.append(device)
-        return _metrics(0.50)
-
-    adapters.evaluate = evaluate
-    rows = run_cluster_evaluation(config_path, adapters=adapters, screen_only=True)
-
-    assert evaluated_devices[0] == "rtx"
-    assert all(row["status"] == "skipped" for row in rows if row["stage"] == "global")
-    assert all(row.get("hardware_benchmarked") is not True for row in rows)
-    assert all(row["stage"] != "global" or "screen-only" in row["reason"] for row in rows)
-
-
-def test_one_failed_probe_does_not_stop_remaining_candidates(monkeypatch, tmp_path, adapters):
+def test_one_failed_probe_does_not_stop_remaining_candidates(tmp_path):
+    adapters = _screening_adapters()
     calls = 0
 
     def fail_first_probe(model, layer, cluster_size, ratio):
@@ -153,15 +124,14 @@ def test_one_failed_probe_does_not_stop_remaining_candidates(monkeypatch, tmp_pa
         calls += 1
         if calls == 1:
             raise ValueError("unsafe dependency group")
-        return {"layer": layer, "cluster_size": cluster_size, "kind": "probe"}
+        return layer
 
-    monkeypatch.setattr(cluster_workflow, "run_structural_probe", fail_first_probe)
-    adapters.make_probe = cluster_workflow.run_structural_probe
+    adapters.make_probe = fail_first_probe
 
-    rows = run_cluster_evaluation(write_config(tmp_path), adapters=adapters)
+    rows = cluster_workflow.run_cluster_screening(_screening_config(tmp_path), adapters=adapters)
 
     assert any(row["status"] == "failed" for row in rows)
-    assert any(row["stage"] == "global" for row in rows)
+    assert any(row["status"] == "completed" for row in rows if row["stage"] == "probe")
     assert len({row["candidate_id"] for row in rows}) == len(rows)
 
 
@@ -803,3 +773,117 @@ def test_valid_orin_merge_reclassifies_failed_global_and_selects_only_benchmarke
     assert failed["hardware_benchmarked"] is True
     manifest = json.loads((tmp_path / "manifest.json").read_text(encoding="utf-8"))
     assert manifest["selected_candidate_ids"] == {"primary": "global-failed", "exploratory": None}
+
+
+def _screening_config(tmp_path: Path) -> Path:
+    path = tmp_path / "cluster-screening.yaml"
+    path.write_text(
+        yaml.safe_dump(
+            {
+                "model": {"checkpoint": "models/baseline.pt"},
+                "data": {"dataset_yaml": "data/camel.yaml"},
+                "experiment": {
+                    "image_size": 336,
+                    "num_classes": 4,
+                    "seed": 7,
+                    "batch_size": 1,
+                    "output_dir": str(tmp_path / "screening-artifacts"),
+                },
+                "runtime": {"device": "cpu", "precision": "fp32"},
+                "pruning": {
+                    "candidate_layers": ["model.1.conv", "model.2.conv"],
+                    "cluster_sizes": [8, 16],
+                    "probe_ratios": [0.1, 0.2],
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    return path
+
+
+def _screening_adapters(*, baseline_error: Exception | None = None, failed_probe: str | None = None):
+    from infrared_detection.evaluation.cluster_workflow import ClusterScreeningAdapters
+
+    def evaluate(model, config, device):
+        del config, device
+        if model == "baseline" and baseline_error:
+            raise baseline_error
+        return _metrics(0.5 if model == "baseline" else 0.49)
+
+    def make_probe(model, layer, cluster_size, ratio):
+        del model, cluster_size, ratio
+        if layer == failed_probe:
+            raise ValueError("unsupported dependency group")
+        return layer
+
+    return ClusterScreeningAdapters(
+        load_model=lambda checkpoint: "baseline",
+        evaluate=evaluate,
+        safe_layers=lambda model, config: list(config["pruning"]["candidate_layers"]),
+        make_probe=make_probe,
+        stats=lambda model: {"parameter_count": 10 if model == "baseline" else 8},
+    )
+
+
+def test_planned_rows_include_only_baseline_and_configured_probes(tmp_path):
+    config_path = _screening_config(tmp_path)
+
+    rows = cluster_workflow.run_cluster_screening(config_path, dry_run=True)
+
+    assert [row["stage"] for row in rows].count("baseline") == 1
+    assert len([row for row in rows if row["stage"] == "probe"]) == 8
+    assert {row["layer"] for row in rows if row["stage"] == "probe"} == {"model.1.conv", "model.2.conv"}
+    assert {row["cluster_size"] for row in rows if row["stage"] == "probe"} == {8, 16}
+    assert all(row["stage"] != "global" for row in rows)
+
+
+def test_cluster_screening_records_each_layer_size_probe(tmp_path):
+    rows = cluster_workflow.run_cluster_screening(
+        _screening_config(tmp_path), adapters=_screening_adapters()
+    )
+
+    probes = [row for row in rows if row["stage"] == "probe"]
+    assert len(probes) == 8
+    assert all(row["status"] == "completed" for row in probes)
+    assert all(row["map50_95"] == 0.49 for row in probes)
+    assert all(row["parameter_count_reduction"] == pytest.approx(0.2) for row in probes)
+    assert all(row["candidate_id"] and row["layer"] and row["cluster_size"] for row in probes)
+
+
+def test_baseline_failure_skips_all_probes(tmp_path):
+    rows = cluster_workflow.run_cluster_screening(
+        _screening_config(tmp_path),
+        adapters=_screening_adapters(baseline_error=RuntimeError("baseline unavailable")),
+    )
+
+    baseline = next(row for row in rows if row["stage"] == "baseline")
+    assert baseline["status"] == "failed"
+    assert "baseline unavailable" in baseline["error"]
+    assert all(row["status"] == "skipped" for row in rows if row["stage"] == "probe")
+
+
+def test_probe_failure_does_not_abort_remaining_rows(tmp_path):
+    rows = cluster_workflow.run_cluster_screening(
+        _screening_config(tmp_path), adapters=_screening_adapters(failed_probe="model.1.conv")
+    )
+
+    probes = [row for row in rows if row["stage"] == "probe"]
+    assert any(row["status"] == "failed" for row in probes)
+    assert any(row["status"] == "completed" for row in probes)
+    assert len(probes) == 8
+
+
+def test_invalid_screening_config_fails_before_loading_models(tmp_path):
+    path = _screening_config(tmp_path)
+    config = yaml.safe_load(path.read_text(encoding="utf-8"))
+    config["pruning"]["cluster_sizes"] = []
+    path.write_text(yaml.safe_dump(config), encoding="utf-8")
+    loaded = []
+    adapters = _screening_adapters()
+    adapters.load_model = lambda checkpoint: loaded.append(checkpoint)
+
+    with pytest.raises(ValueError, match="cluster_sizes"):
+        cluster_workflow.run_cluster_screening(path, adapters=adapters)
+
+    assert loaded == []
