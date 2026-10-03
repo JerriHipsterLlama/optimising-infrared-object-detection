@@ -1,5 +1,5 @@
-"""Model compression workflows."""
+"""Model compression primitives used by retained workflows."""
 
-from . import distillation, pruning, quantization
+from . import pruning, quantization
 
-__all__ = ["distillation", "pruning", "quantization"]
+__all__ = ["pruning", "quantization"]

@@ -102,6 +102,26 @@ def test_load_compression_config_accepts_fp32_fp16_matrix(tmp_path):
     assert config["precisions"] == ["fp32", "fp16"]
 
 
+def test_compression_requires_explicit_baseline_checkpoint_before_export(tmp_path):
+    config_path = tmp_path / "matrix.yaml"
+    config_path.write_text(
+        "precisions: [fp32, fp16, int8]\n"
+        "pruning:\n  enabled: false\n"
+        f"experiment:\n  output_dir: {tmp_path / 'output'}\n",
+        encoding="utf-8",
+    )
+    export_calls = []
+    adapters = compression_matrix.CompressionMatrixAdapters(
+        build_pruned_checkpoint=lambda *args: pytest.fail("pruning must not start"),
+        export_checkpoint=lambda *args: export_calls.append(args),
+        convert_precision=lambda *args: pytest.fail("conversion must not start"),
+    )
+
+    with pytest.raises(ValueError, match="model.checkpoint"):
+        compression_matrix.run_compression_matrix(config_path, adapters=adapters)
+    assert export_calls == []
+
+
 def test_rtx_config_declares_manual_cluster_pruning_contract():
     config_path = Path("configs/experiments/rtx_compression_matrix.yaml")
 

@@ -3,6 +3,9 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+import yaml
+
 from apps.train import build_parser
 
 
@@ -65,3 +68,24 @@ def test_training_and_sensitivity_help_do_not_start_workflows():
 
     assert "yolov8" in training and "faster-rcnn" in training
     assert "--config" in sensitivity and "Sensitivity experiment YAML" in sensitivity
+
+
+def test_yolo_training_dry_run_uses_checkpoint_directory_from_model_config(tmp_path, monkeypatch):
+    from infrared_detection.models.yolov8 import training as yolov8_training
+
+    source_config = yaml.safe_load((ROOT / "configs/models/yolov8.yaml").read_text(encoding="utf-8"))
+    dataset_dir = tmp_path / "dataset"
+    dataset_dir.mkdir()
+    (dataset_dir / "camel.yaml").write_text("path: .\n", encoding="utf-8")
+    checkpoint_dir = tmp_path / "configured-checkpoints"
+    source_config["model"]["device"] = "cpu"
+    source_config["data"]["dataset_path"] = str(dataset_dir)
+    source_config["checkpoint"]["resume_from"] = str(checkpoint_dir)
+    source_config["export"]["onnx"] = False
+    config_path = tmp_path / "yolov8.yaml"
+    config_path.write_text(yaml.safe_dump(source_config), encoding="utf-8")
+    monkeypatch.setattr(yolov8_training, "YOLO", lambda *_: pytest.fail("dry-run must not train"))
+
+    output = yolov8_training.train_yolov8(config_path=config_path, name="baseline", dry_run=True)
+
+    assert output == checkpoint_dir.resolve() / "baseline"

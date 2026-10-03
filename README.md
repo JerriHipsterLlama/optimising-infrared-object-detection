@@ -1,6 +1,6 @@
 # Infrared Object Detection Research Pipeline
 
-This repository evaluates quantization, structured pruning, and knowledge distillation for infrared object detection on the NVIDIA Jetson Orin Nano.
+This repository screens and compresses infrared object-detection models for evaluation on an NVIDIA Jetson Orin Nano. The active compression matrix produces FP32, FP16, and INT8 ONNX artifacts; Focal and Global Knowledge Distillation are deferred to a later stage.
 
 ## Setup
 
@@ -28,24 +28,17 @@ python apps/train.py yolov8 --config configs/models/yolov8.yaml
 python apps/train.py faster-rcnn --config configs/models/faster_rcnn.yaml
 ```
 
-Training outputs should use `artifacts/checkpoints/` or an explicitly configured output directory.
+Training is optional and separate from compression. The YOLO trainer writes to the configured checkpoint directory; compression requires an explicit external baseline checkpoint in its experiment YAML. Faster R-CNN training and its config remain available, but its compression path is deferred.
 
 ## Compression
 
-```powershell
-python apps/compress.py matrix --config configs/experiments/compression_matrix.yaml --dry-run
-```
-
-The compression library is under `src/infrared_detection/compression/`, with pruning, quantization, and distillation kept as separate factors.
-
-## Evaluation and reporting
+Compression does not train models, calculate detection accuracy, build TensorRT engines, or benchmark latency. It exports the configured dense checkpoint and any configured structural-pruning variants to ONNX, then converts each to the requested precision. Accuracy and deployment performance are separate workflows.
 
 ```powershell
-python apps/evaluate.py --input artifacts/predictions/raw_metrics.json --output artifacts/predictions/metrics.json
-python apps/report.py --input reports/experiment_rows.json --output reports/pareto.json
+python apps/evaluate_compression_matrix.py --config configs/experiments/rtx_compression_matrix.yaml --dry-run
 ```
 
-The evaluation plan is [docs/research/evaluation-plan.md](docs/research/evaluation-plan.md). Core metrics include mAP50, mAP50-95, precision, recall, serialized artifact size, memory, latency, FPS, energy, and Pareto efficiency.
+Install the ONNX conversion extra with `python -m pip install -e ".[compression]"`. The external checkpoint path is set by `model.checkpoint`; the matrix fails if it is missing rather than training or guessing a baseline.
 
 ## Export and Jetson benchmarking
 
@@ -55,9 +48,9 @@ Export a model through the narrow adapter in `src/infrared_detection/export/`:
 python apps/export.py --model artifacts/checkpoints/best.pt --format onnx --imgsz 320
 ```
 
-The Python-side TensorRT adapter is available through `apps/benchmark.py`. The native Jetson benchmark is documented under `deploy/jetson/` and is the authoritative path for batch-1 latency, p50/p95 timing, memory, power, and thermal measurements.
+The native Jetson benchmark is documented under `deploy/jetson/` and is the target-local path for TensorRT inference measurements.
 
-The native benchmark consumes real test images and can preserve raw TensorRT output tensors for offline Python post-processing. Use the native output for deployment-performance metrics and the Python evaluation pipeline for mAP, precision, recall, and class-level analysis.
+The repository's five research workflows are separate: model-sensitivity screening, filterwise performance screening, cluster-size screening, ONNX compression, and directory-driven model testing. Training and ONNX export are supporting entrypoints.
 
 ### Cluster-pruning execution
 
@@ -118,7 +111,7 @@ python apps/evaluate_model_testing_matrix.py --config configs/experiments/jetson
 python apps/evaluate_model_testing_matrix.py --config configs/experiments/jetson_model_testing_matrix.yaml
 ```
 
-The Jetson config runs both Python quality evaluation and the native C++ TensorRT latency runner. It builds each engine locally from its ONNX file under `runs/experiments/model_testing_matrix/jetson_orin_nano/`, then reports latency/runtime provenance separately from Python quality metrics. TensorRT receives strongly typed ONNX (`--stronglyTyped`); no `--fp16`, `--int8`, or calibration-cache flags are added because precision and INT8 Q/DQ calibration are already encoded in the ONNX artifact. These tests have not been run on Jetson hardware by this workflow; the on-device command is the acceptance run. Knowledge distillation remains out of scope.
+The Jetson config runs Python quality evaluation and the native C++ TensorRT latency runner. It builds each engine locally from its ONNX file, then reports latency/runtime provenance separately from Python quality metrics. TensorRT receives strongly typed ONNX (`--stronglyTyped`); no `--fp16`, `--int8`, or calibration-cache flags are added because precision and INT8 Q/DQ calibration are encoded in the ONNX artifact. These checks must be run on Jetson hardware to establish target compatibility.
 
 ### Single-layer performance-response screening
 

@@ -1,10 +1,5 @@
-"""Low-precision checkpoint quantization utilities."""
+"""ONNX precision conversion for deployment-ready model variants."""
 
-from .low_precision_quantization import (
-    dequantize_state_dict,
-    quantize_checkpoint,
-    quantize_state_dict,
-)
 from .onnx_precision import (
     CalibrationImageReader,
     calibration_reader_from_onnx,
@@ -14,8 +9,5 @@ from .onnx_precision import (
 __all__ = [
     "CalibrationImageReader",
     "calibration_reader_from_onnx",
-    "dequantize_state_dict",
     "prepare_precision_onnx",
-    "quantize_checkpoint",
-    "quantize_state_dict",
 ]

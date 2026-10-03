@@ -6,15 +6,29 @@ from pathlib import Path
 import yaml
 
 
-def test_evaluation_apps_expose_help():
-    for app in ("evaluate.py", "export.py", "benchmark.py", "report.py", "evaluate_cluster_pruning.py"):
+def test_retained_workflow_entrypoints_expose_help():
+    root = Path(__file__).resolve().parents[2]
+    for app in (
+        "yolov8_accuracy_sensitivity.py",
+        "single_layer_performance_screening.py",
+        "evaluate_cluster_pruning.py",
+        "evaluate_compression_matrix.py",
+        "evaluate_model_testing_matrix.py",
+    ):
         result = subprocess.run(
             [sys.executable, f"apps/{app}", "--help"],
+            cwd=root,
             capture_output=True,
             text=True,
             check=False,
         )
         assert result.returncode == 0, result.stderr
+
+
+def test_legacy_compression_and_generic_reporting_commands_are_removed():
+    root = Path(__file__).resolve().parents[2]
+    for app in ("compress.py", "evaluate.py", "report.py", "benchmark.py"):
+        assert not (root / "apps" / app).exists()
 
 
 def test_cluster_pruning_app_does_not_expose_removed_filterwise_modes():
