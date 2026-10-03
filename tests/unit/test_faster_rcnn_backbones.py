@@ -3,7 +3,7 @@ from collections import OrderedDict
 import torch
 
 from infrared_detection.models.faster_rcnn.backbones import ResNet34FPNBackbone
-from infrared_detection.models.faster_rcnn.training import build_faster_rcnn_model
+from infrared_detection.models.faster_rcnn.training import build_faster_rcnn_model, collate_fn
 
 
 def model_config(backbone: str, pretrained: bool = False) -> dict:
@@ -53,3 +53,19 @@ def test_resnet_variants_run_a_cpu_training_loss_pass_without_pretrained_weights
 
         assert losses
         assert all(torch.isfinite(value) for value in losses.values())
+
+
+def test_faster_rcnn_collate_adapts_grayscale_images_to_three_channels():
+    images, _ = collate_fn(
+        [
+            (
+                torch.zeros(1, 64, 64),
+                {
+                    "boxes": torch.tensor([[8.0, 8.0, 40.0, 40.0]]),
+                    "class_ids": torch.tensor([1]),
+                },
+            )
+        ]
+    )
+
+    assert images[0].shape == (3, 64, 64)

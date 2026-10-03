@@ -273,6 +273,8 @@ def collate_fn(batch):
     targets = []
 
     for image, target in batch:
+        if image.shape[0] == 1:
+            image = image.repeat(3, 1, 1)
         images.append(image)
 
         # Safeguard: Handle empty bounding boxes (can occur after aggressive augmentation)
@@ -936,6 +938,13 @@ def get_next_run_dir(base_dir: Path, name: str = 'train') -> Path:
         i += 1
 
 
+def resolve_checkpoint_root(config: dict) -> Path:
+    """Resolve the configured root directory for Faster R-CNN runs."""
+
+    configured_root = config.get('checkpoint', {}).get('resume_from')
+    return Path(configured_root or 'artifacts/checkpoints/faster_rcnn')
+
+
 def save_checkpoint(checkpoint_path: Path, epoch: int, model, optimizer, lr_scheduler,
                    best_val_loss: float, metrics_history: dict, config: dict, ema=None):
     """
@@ -1084,7 +1093,7 @@ def train_faster_rcnn(
     batch_size = batch_size or config['training']['batch_size']
 
     # Setup run directory (train, train2, train3, etc.)
-    base_checkpoint_dir = Path("artifacts/checkpoints/faster_rcnn")
+    base_checkpoint_dir = resolve_checkpoint_root(config)
 
     # If resuming, use existing checkpoint directory
     if resume or checkpoint_path:
@@ -1183,7 +1192,10 @@ def train_faster_rcnn(
     num_classes = config['data']['num_classes']
     model = build_faster_rcnn_model(num_classes, config)
     model.to(device)
-    logger.info(f"Model: Faster R-CNN with MobileNetV3 Large ({num_classes} classes)")
+    backbone_name = config['model'].get('backbone', 'mobilenet')
+    logger.info(
+        f"Model: Faster R-CNN with {backbone_name} backbone ({num_classes} classes)"
+    )
 
     # Optimize model with torch.compile (PyTorch 2.0+)
     if config['model'].get('compile', False):

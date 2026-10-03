@@ -3,7 +3,7 @@
 # Image size: 336x256, Grayscale
 
 model:
-  name: "faster_rcnn_mobilenet_v3_large_fpn"
+  name: "faster_rcnn_resnet50_fpn"
   backbone: "resnet50"
   pretrained: true  # Use COCO pretrained weights (CRITICAL for convergence!)
   img_size: 336  # Native CAMEL image width (336x256 aspect ratio)

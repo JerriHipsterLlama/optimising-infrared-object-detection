@@ -112,3 +112,11 @@ def test_yolo_training_dry_run_uses_checkpoint_directory_from_model_config(tmp_p
     output = yolov8_training.train_yolov8(config_path=config_path, name="baseline", dry_run=True)
 
     assert output == checkpoint_dir.resolve() / "baseline"
+
+
+def test_faster_rcnn_training_uses_configured_checkpoint_root():
+    from infrared_detection.models.faster_rcnn.training import resolve_checkpoint_root
+
+    config = {"checkpoint": {"resume_from": "artifacts/checkpoints/resnet34"}}
+
+    assert resolve_checkpoint_root(config) == Path("artifacts/checkpoints/resnet34")
