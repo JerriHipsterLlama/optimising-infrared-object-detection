@@ -3,8 +3,7 @@
 from __future__ import annotations
 
 import shutil
-import subprocess
-import sys
+from importlib.metadata import version
 from pathlib import Path
 from typing import Any
 
@@ -151,7 +150,11 @@ def prepare_precision_onnx(
     output.parent.mkdir(parents=True, exist_ok=True)
 
     if precision == "fp32":
+        import onnx
+
+        onnx.checker.check_model(str(source))
         shutil.copy2(source, output)
+        onnx.checker.check_model(str(output))
         return {
             "converter": "copy",
             "precision": precision,
@@ -159,28 +162,20 @@ def prepare_precision_onnx(
             "output_path": str(output.resolve()),
         }
     if precision == "fp16":
-        result = subprocess.run(
-            [
-                sys.executable,
-                "-m",
-                "modelopt.onnx.autocast",
-                "--onnx_path",
-                str(source),
-                "--output_path",
-                str(output),
-            ],
-            check=True,
-            capture_output=True,
-            text=True,
-        )
-        if not output.is_file():
-            raise FileNotFoundError(f"ModelOpt FP16 conversion did not write output: {output}\n{result.stdout}\n{result.stderr}")
+        import onnx
+        from onnxconverter_common import float16
+
+        model = onnx.load(str(source))
+        converted = float16.convert_float_to_float16(model, keep_io_types=True)
+        onnx.checker.check_model(converted)
+        onnx.save(converted, str(output))
+        onnx.checker.check_model(str(output))
         return {
-            "converter": "modelopt.onnx.autocast",
+            "converter": "onnxconverter-common",
+            "converter_version": version("onnxconverter-common"),
             "precision": precision,
             "input_path": str(source.resolve()),
             "output_path": str(output.resolve()),
-            "modelopt_output": {"stdout": result.stdout, "stderr": result.stderr},
         }
     if precision != "int8":
         raise ValueError(f"Unsupported ONNX precision: {precision}")
@@ -192,25 +187,41 @@ def prepare_precision_onnx(
     if sample_count <= 0:
         raise ValueError("INT8 calibration dataset is empty")
 
-    from modelopt.onnx.quantization import quantize
+    import onnx
+    import onnxruntime
+    from onnxruntime.quantization import (
+        CalibrationMethod,
+        QuantFormat,
+        QuantType,
+        quantize_static,
+    )
 
-    modelopt_result = quantize(
+    calibration_methods = {
+        "max": CalibrationMethod.MinMax,
+        "entropy": CalibrationMethod.Entropy,
+    }
+    onnx.checker.check_model(str(source))
+    quantize_static(
         str(source),
-        quantize_mode="int8",
-        calibration_data_reader=calibration_reader,
-        calibration_method=calibration_method,
-        output_path=str(output),
+        str(output),
+        calibration_reader,
+        quant_format=QuantFormat.QDQ,
+        activation_type=QuantType.QInt8,
+        weight_type=QuantType.QInt8,
+        calibrate_method=calibration_methods[calibration_method],
     )
     if not output.is_file():
-        raise FileNotFoundError(f"ModelOpt INT8 conversion did not write output: {output}")
+        raise FileNotFoundError(f"ONNX Runtime INT8 conversion did not write output: {output}")
+    onnx.checker.check_model(str(output))
     return {
-        "converter": "modelopt.onnx.quantization.quantize",
+        "converter": "onnxruntime.quantization.quantize_static",
+        "converter_version": onnxruntime.__version__,
         "precision": precision,
         "input_path": str(source.resolve()),
         "output_path": str(output.resolve()),
+        "quantization_mode": "QDQ",
         "calibration_method": calibration_method,
         "calibration_source": str(getattr(calibration_reader, "image_dir", "")),
         "calibration_sample_count": sample_count,
         "calibration_preprocessing": getattr(calibration_reader, "preprocessing", None),
-        "modelopt_output": repr(modelopt_result),
     }

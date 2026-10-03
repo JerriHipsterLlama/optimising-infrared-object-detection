@@ -73,13 +73,13 @@ Use `--dry-run` to inspect the planned baseline and cluster probes without loadi
 
 Compression creates ONNX artifacts only; engine building and testing are separate target-local stages. Dense and structured-pruned candidates start from the dense checkpoint. The matrix writes FP32, FP16, and INT8 ONNX variants for input size 352, the approved candidate layers, cluster size 8, and configured pruning ratios.
 
-Install the optional NVIDIA ModelOpt dependencies in the active environment to enable FP16/INT8 conversion:
+Install the ONNX conversion dependency in the active environment to enable FP16/INT8 conversion:
 
 ```powershell
 python -m pip install -e ".[compression]"
 ```
 
-FP32 conversion simply copies the exported graph. FP16 uses ModelOpt ONNX autocast; INT8 uses ModelOpt ONNX quantization with entropy calibration. The configured calibration images come from `data.calibration_image_dir` (currently the training split), are streamed in deterministic order, letterboxed to the ONNX input shape, converted BGR→RGB, and normalized to [0, 1]. The test split is rejected as a calibration source. Calibration settings are controlled by `quantization.calibration_method` and `quantization.calibration_samples`.
+FP32 conversion copies and validates the exported graph. FP16 uses `onnxconverter-common` while keeping external model inputs and outputs in FP32. INT8 uses ONNX Runtime static QDQ quantization with the configured calibration method. Calibration images come from `data.calibration_image_dir` (currently the training split), are streamed in deterministic order, letterboxed to the ONNX input shape, converted BGR→RGB, and normalized to [0, 1]. The test split is rejected as a calibration source. Converter/version and calibration details are recorded per matrix row; calibration settings are controlled by `quantization.calibration_method` and `quantization.calibration_samples`.
 
 Run a planning check first:
 

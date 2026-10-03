@@ -9,7 +9,7 @@ description = "Research package for infrared object detection"
 requires-python = ">=3.10"
 
 [project.optional-dependencies]
-compression = ["nvidia-modelopt[onnx]"]
+compression = ["onnxconverter-common"]
 
 [tool.setuptools]
 package-dir = {"" = "src"}
