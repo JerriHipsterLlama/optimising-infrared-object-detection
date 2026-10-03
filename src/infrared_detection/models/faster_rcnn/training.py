@@ -58,14 +58,22 @@ import torch.optim as optim
 from torch.utils.data import DataLoader
 
 import torchvision.models as models
-from torchvision.models.detection import FasterRCNN, FasterRCNN_MobileNet_V3_Large_FPN_Weights
+from torchvision.models import ResNet34_Weights
+from torchvision.models.detection import (
+    FasterRCNN,
+    FasterRCNN_MobileNet_V3_Large_FPN_Weights,
+    FasterRCNN_ResNet50_FPN_Weights,
+)
 from torchvision.models.detection.faster_rcnn import FastRCNNPredictor
+from torchvision.ops import MultiScaleRoIAlign
+from torchvision.models.detection.rpn import AnchorGenerator
 from torchvision.ops import box_iou
 
 from tqdm import tqdm
 
 from infrared_detection.common import load_config
 from infrared_detection.data import CAMELDataset
+from infrared_detection.models.faster_rcnn.backbones import ResNet34FPNBackbone
 
 
 # ==============================================================================
@@ -169,17 +177,60 @@ def build_faster_rcnn_model(num_classes: int, config: dict) -> FasterRCNN:
     Returns:
         FasterRCNN model
     """
-    # Use pretrained weights on COCO (better initialization than random weights)
+    backbone_name = config['model'].get('backbone', 'mobilenet').lower()
     use_pretrained = config['model'].get('pretrained', True)
+    trainable_layers = config['model'].get('trainable_layers', 6)
+    min_size = config['model'].get('min_size', 336)
+    max_size = config['model'].get('max_size', 336)
+
+    if backbone_name == 'resnet50':
+        model = models.detection.fasterrcnn_resnet50_fpn(
+            weights=FasterRCNN_ResNet50_FPN_Weights.DEFAULT if use_pretrained else None,
+            weights_backbone=None,
+            min_size=min_size,
+            max_size=max_size,
+            trainable_backbone_layers=min(trainable_layers, 5),
+        )
+        in_features = model.roi_heads.box_predictor.cls_score.in_features
+        model.roi_heads.box_predictor = FastRCNNPredictor(in_features, num_classes)
+        return model
+
+    if backbone_name == 'resnet34':
+        backbone = ResNet34FPNBackbone(
+            weights=ResNet34_Weights.DEFAULT if use_pretrained else None,
+            trainable_layers=trainable_layers,
+        )
+        anchor_generator = AnchorGenerator(
+            sizes=((32,), (64,), (128,), (256,)),
+            aspect_ratios=((0.5, 1.0, 2.0),) * 4,
+        )
+        box_roi_pool = MultiScaleRoIAlign(
+            featmap_names=['0', '1', '2', '3'],
+            output_size=7,
+            sampling_ratio=2,
+        )
+        return FasterRCNN(
+            backbone,
+            num_classes=num_classes,
+            min_size=min_size,
+            max_size=max_size,
+            rpn_anchor_generator=anchor_generator,
+            box_roi_pool=box_roi_pool,
+        )
+
+    if backbone_name != 'mobilenet':
+        raise ValueError(f"Unsupported Faster R-CNN backbone: {backbone_name}")
+
+    # Use pretrained weights on COCO (better initialization than random weights)
 
     if use_pretrained:
         # Load model with COCO pretrained weights (91 classes)
         weights = FasterRCNN_MobileNet_V3_Large_FPN_Weights.DEFAULT
         model = models.detection.fasterrcnn_mobilenet_v3_large_fpn(
             weights=weights,
-            min_size=config['model'].get('min_size', 336),
-            max_size=config['model'].get('max_size', 336),
-            trainable_backbone_layers=config['model'].get('trainable_layers', 6),
+            min_size=min_size,
+            max_size=max_size,
+            trainable_backbone_layers=trainable_layers,
         )
 
         # Replace the classification head with custom number of classes
@@ -193,9 +244,9 @@ def build_faster_rcnn_model(num_classes: int, config: dict) -> FasterRCNN:
         model = models.detection.fasterrcnn_mobilenet_v3_large_fpn(
             weights=None,
             num_classes=num_classes,
-            min_size=config['model'].get('min_size', 336),
-            max_size=config['model'].get('max_size', 336),
-            trainable_backbone_layers=config['model'].get('trainable_layers', 6),
+            min_size=min_size,
+            max_size=max_size,
+            trainable_backbone_layers=trainable_layers,
         )
         print(f"⚠ Training from scratch (no pretrained weights)")
 
