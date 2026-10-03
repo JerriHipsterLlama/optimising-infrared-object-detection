@@ -408,3 +408,58 @@ def test_compression_manifest_artifacts_are_discoverable_by_testing_matrix(tmp_p
     assert {row["precision"] for row in rows} == {"fp32", "fp16", "int8"}
     assert all(row["status"] == "planned" for row in rows)
     assert not (tmp_path / "results").exists()
+
+
+def test_testing_matrix_reuses_only_rows_with_matching_settings(tmp_path):
+    config_path = _config(tmp_path, backend="both")
+    adapters, calls = _adapters()
+
+    first_rows = run_model_testing_matrix(config_path, adapters=adapters)
+    first_call_count = len(calls)
+    repeated_rows = run_model_testing_matrix(config_path, adapters=adapters)
+
+    assert len(calls) == first_call_count
+    assert all(row["status"] == "completed" for row in repeated_rows)
+    row = first_rows[0]
+    assert row["test_provenance"]["backend"] == "both"
+    assert row["test_provenance"]["dataset_yaml"] == str((tmp_path / "dataset.yaml").resolve())
+    assert row["test_provenance"]["device"] == "0"
+
+    dataset_yaml = tmp_path / "dataset.yaml"
+    dataset_yaml.write_text("names: [camel]\n", encoding="utf-8")
+    run_model_testing_matrix(config_path, adapters=adapters)
+    assert len(calls) == first_call_count + 9
+
+    dataset_yaml.write_text("names: [camel, vehicle]\n", encoding="utf-8")
+    run_model_testing_matrix(config_path, adapters=adapters)
+    assert len(calls) == first_call_count + 18
+
+    config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    config["testing"]["backend"] = "python"
+    config_path.write_text(yaml.safe_dump(config), encoding="utf-8")
+    changed_rows = run_model_testing_matrix(config_path, adapters=adapters)
+
+    assert len(calls) == first_call_count + 21
+    assert all(row["test_provenance"]["backend"] == "python" for row in changed_rows)
+
+
+def test_testing_matrix_retests_only_new_or_content_changed_onnx(tmp_path):
+    config_path = _config(tmp_path)
+    adapters, calls = _adapters()
+    run_model_testing_matrix(config_path, adapters=adapters)
+    first_call_count = len(calls)
+
+    new_model = _artifact(tmp_path / "onnx", "new-candidate", "fp32")
+    added_rows = run_model_testing_matrix(config_path, adapters=adapters)
+    assert len(calls) == first_call_count + 1
+    assert next(row for row in added_rows if row["candidate_id"] == "new-candidate")["status"] == "completed"
+
+    changed_model = onnx.load(new_model)
+    metadata = changed_model.metadata_props.add()
+    metadata.key = "revision"
+    metadata.value = "2"
+    onnx.save(changed_model, new_model)
+    changed_rows = run_model_testing_matrix(config_path, adapters=adapters)
+
+    assert len(calls) == first_call_count + 2
+    assert all(row["status"] == "completed" for row in changed_rows)

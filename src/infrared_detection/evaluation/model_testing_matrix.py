@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import shutil
 import subprocess
@@ -138,6 +139,58 @@ def _onnx_inventory(path: Path) -> dict[str, Any]:
     }
 
 
+def _file_sha256(path: Path) -> str | None:
+    if not path.is_file():
+        return None
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _test_provenance(
+    onnx_path: Path, config: Mapping[str, Any], external_data_files: list[str]
+) -> dict[str, Any]:
+    testing = config["testing"]
+    dataset_path = _resolve_path(testing["dataset_yaml"])
+    provenance = {
+        "onnx_path": str(onnx_path.resolve()),
+        "onnx_sha256": _file_sha256(onnx_path),
+        "external_data": [
+            {"path": path, "sha256": _file_sha256(Path(path))}
+            for path in external_data_files
+        ],
+        "backend": testing["backend"],
+        "dataset_yaml": str(dataset_path.resolve()),
+        "dataset_sha256": _file_sha256(dataset_path),
+        "split": testing["split"],
+        "image_size": int(testing["image_size"]),
+        "confidence": float(testing["confidence"]),
+        "iou": float(testing["iou"]),
+        "device": str(testing.get("device", "0")),
+    }
+    if testing["backend"] in {"jetson_cpp", "both"}:
+        runner = _resolve_path(testing["runner"])
+        provenance.update(
+            {
+                "hardware_label": str(testing.get("hardware_label", "target")),
+                "workspace_mb": int(testing.get("workspace_mb", 4096)),
+                "runner": str(runner.resolve()),
+                "runner_sha256": _file_sha256(runner),
+                "image_dir": str(_resolve_path(testing["image_dir"]).resolve()),
+                "warmup": int(testing.get("warmup", 20)),
+                "iterations": int(testing.get("iterations", 100)),
+            }
+        )
+    return provenance
+
+
+def _fingerprint(provenance: Mapping[str, Any]) -> str:
+    content = json.dumps(provenance, sort_keys=True, separators=(",", ":"), default=str)
+    return hashlib.sha256(content.encode("utf-8")).hexdigest()
+
+
 def planned_test_rows(config: Mapping[str, Any]) -> list[dict[str, Any]]:
     """Discover artifacts and validate their explicit candidate/precision identity."""
 
@@ -152,17 +205,27 @@ def planned_test_rows(config: Mapping[str, Any]) -> list[dict[str, Any]]:
     for onnx_path in paths:
         candidate_id, precision = _artifact_identity(onnx_path)
         row = {
-                "variant_id": f"{candidate_id}-{precision}",
-                "candidate_id": candidate_id,
-                "precision": precision,
-                "onnx_path": str(onnx_path),
-                "status": "planned",
-                "python_status": "not_requested",
-                "jetson_cpp_status": "not_requested",
-                "error": None,
-            }
+            "variant_id": f"{candidate_id}-{precision}",
+            "candidate_id": candidate_id,
+            "precision": precision,
+            "onnx_path": str(onnx_path),
+            "status": "planned",
+            "python_status": "not_requested",
+            "jetson_cpp_status": "not_requested",
+            "error": None,
+        }
         try:
-            row.update(_onnx_inventory(onnx_path))
+            inventory = _onnx_inventory(onnx_path)
+            provenance = _test_provenance(
+                onnx_path, config, inventory["external_data_files"]
+            )
+            row.update(
+                {
+                    **inventory,
+                    "test_provenance": provenance,
+                    "fingerprint": _fingerprint(provenance),
+                }
+            )
         except Exception as exc:
             row["artifact_error"] = f"{type(exc).__name__}: {exc}"
         rows.append(row)
@@ -268,6 +331,31 @@ def _write_results(output_dir: Path, config: Mapping[str, Any], rows: list[dict[
     write_metrics_csv(output_dir / "results.csv", rows, leading_columns=("variant_id", "candidate_id", "precision", "status"))
 
 
+def _reuse_completed_rows(output_dir: Path, rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    manifest_path = output_dir / "manifest.json"
+    if not manifest_path.is_file():
+        return rows
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        saved_rows = {
+            str(row["variant_id"]): row
+            for row in manifest.get("rows", [])
+            if isinstance(row, Mapping) and isinstance(row.get("variant_id"), str)
+        }
+    except (OSError, TypeError, ValueError, AttributeError):
+        return rows
+    for row in rows:
+        saved = saved_rows.get(str(row["variant_id"]))
+        if (
+            isinstance(saved, Mapping)
+            and saved.get("status") == "completed"
+            and saved.get("fingerprint") == row.get("fingerprint")
+        ):
+            row.clear()
+            row.update(dict(saved))
+    return rows
+
+
 def _row_status(row: Mapping[str, Any], backend: str) -> str:
     statuses = []
     if backend in {"python", "both"}:
@@ -294,10 +382,13 @@ def run_model_testing_matrix(
     if dry_run:
         return rows
 
+    rows = _reuse_completed_rows(output_dir, rows)
     active = adapters or ModelTestingMatrixAdapters.defaults()
     backend = str(config["testing"]["backend"])
     hardware = str(config["testing"].get("hardware_label", "target"))
     for row in rows:
+        if row.get("status") == "completed":
+            continue
         onnx_path = Path(row["onnx_path"])
         if row.get("artifact_error"):
             row["status"] = "failed"
