@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import builtins
 from pathlib import Path
 
 import numpy as np
@@ -103,6 +104,43 @@ def test_empty_calibration_data_fails_before_quantize(tmp_path):
             source, output, "int8", calibration_reader=reader
         )
     assert not output.exists()
+
+
+def test_missing_fp16_converter_reports_install_command(monkeypatch, tmp_path):
+    source = _onnx_model(tmp_path / "source.onnx")
+    original_import = builtins.__import__
+
+    def import_without_converter(name, *args, **kwargs):
+        if name == "onnxconverter_common":
+            raise ModuleNotFoundError("simulated missing ONNX converter")
+        return original_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", import_without_converter)
+
+    with pytest.raises(RuntimeError, match=r"onnxconverter-common.*\.\[compression\]"):
+        prepare_precision_onnx(source, tmp_path / "fp16.onnx", "fp16")
+
+
+def test_missing_int8_runtime_reports_install_guidance(monkeypatch, tmp_path):
+    from types import SimpleNamespace
+
+    source = _onnx_model(tmp_path / "source.onnx")
+    original_import = builtins.__import__
+
+    def import_without_runtime(name, *args, **kwargs):
+        if name == "onnxruntime":
+            raise ModuleNotFoundError("simulated missing ONNX Runtime")
+        return original_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", import_without_runtime)
+
+    with pytest.raises(RuntimeError, match="onnxruntime"):
+        prepare_precision_onnx(
+            source,
+            tmp_path / "int8.onnx",
+            "int8",
+            calibration_reader=SimpleNamespace(sample_count=1),
+        )
 
 
 def test_precision_conversion_error_is_preserved_in_variant_row(tmp_path):

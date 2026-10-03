@@ -13,6 +13,16 @@ import numpy as np
 _IMAGE_SUFFIXES = {".bmp", ".jpeg", ".jpg", ".png", ".tif", ".tiff", ".webp"}
 
 
+def _require_onnx() -> Any:
+    try:
+        import onnx
+    except ImportError as exc:
+        raise RuntimeError(
+            "ONNX conversion requires the 'onnx' package; install the project dependencies from requirements.txt."
+        ) from exc
+    return onnx
+
+
 class CalibrationImageReader:
     """Stream deterministic, letterboxed calibration batches for ONNX Runtime."""
 
@@ -150,8 +160,7 @@ def prepare_precision_onnx(
     output.parent.mkdir(parents=True, exist_ok=True)
 
     if precision == "fp32":
-        import onnx
-
+        onnx = _require_onnx()
         onnx.checker.check_model(str(source))
         shutil.copy2(source, output)
         onnx.checker.check_model(str(output))
@@ -162,8 +171,14 @@ def prepare_precision_onnx(
             "output_path": str(output.resolve()),
         }
     if precision == "fp16":
-        import onnx
-        from onnxconverter_common import float16
+        onnx = _require_onnx()
+        try:
+            from onnxconverter_common import float16
+        except ImportError as exc:
+            raise RuntimeError(
+                'FP16 conversion requires onnxconverter-common; install it with '
+                'python -m pip install -e ".[compression]".'
+            ) from exc
 
         model = onnx.load(str(source))
         converted = float16.convert_float_to_float16(model, keep_io_types=True)
@@ -187,14 +202,19 @@ def prepare_precision_onnx(
     if sample_count <= 0:
         raise ValueError("INT8 calibration dataset is empty")
 
-    import onnx
-    import onnxruntime
-    from onnxruntime.quantization import (
-        CalibrationMethod,
-        QuantFormat,
-        QuantType,
-        quantize_static,
-    )
+    onnx = _require_onnx()
+    try:
+        import onnxruntime
+        from onnxruntime.quantization import (
+            CalibrationMethod,
+            QuantFormat,
+            QuantType,
+            quantize_static,
+        )
+    except ImportError as exc:
+        raise RuntimeError(
+            "INT8 conversion requires onnxruntime; install the project dependencies from requirements.txt."
+        ) from exc
 
     calibration_methods = {
         "max": CalibrationMethod.MinMax,
