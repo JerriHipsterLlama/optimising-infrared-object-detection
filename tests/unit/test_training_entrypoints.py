@@ -120,3 +120,13 @@ def test_faster_rcnn_training_uses_configured_checkpoint_root():
     config = {"checkpoint": {"resume_from": "artifacts/checkpoints/resnet34"}}
 
     assert resolve_checkpoint_root(config) == Path("artifacts/checkpoints/resnet34")
+
+
+def test_faster_rcnn_training_module_can_serialize_saved_config(tmp_path):
+    from infrared_detection.models.faster_rcnn import training as faster_rcnn_training
+
+    output = tmp_path / "args.yaml"
+    with output.open("w", encoding="utf-8") as stream:
+        faster_rcnn_training.yaml.dump({"model": {"backbone": "resnet50"}}, stream)
+
+    assert "backbone: resnet50" in output.read_text(encoding="utf-8")
