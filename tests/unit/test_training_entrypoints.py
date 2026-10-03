@@ -31,6 +31,29 @@ def test_training_default_configs_exist():
     assert (ROOT / "configs/models/faster_rcnn.yaml").is_file()
 
 
+def test_four_baseline_configs_select_distinct_models_and_outputs():
+    configs = {
+        name: yaml.safe_load((ROOT / path).read_text(encoding="utf-8"))
+        for name, path in {
+            "yolov8n": "configs/models/yolov8n.yaml",
+            "yolov8m": "configs/models/yolov8.yaml",
+            "resnet34": "configs/models/faster_rcnn_resnet34.yaml",
+            "resnet50": "configs/models/faster_rcnn.yaml",
+        }.items()
+    }
+
+    assert configs["yolov8n"]["model"]["name"] == "yolov8n"
+    assert configs["yolov8m"]["model"]["name"] == "yolov8m"
+    assert configs["resnet34"]["model"]["backbone"] == "resnet34"
+    assert configs["resnet50"]["model"]["backbone"] == "resnet50"
+
+    output_roots = {
+        configs[name]["checkpoint"]["resume_from"]
+        for name in configs
+    }
+    assert len(output_roots) == 4
+
+
 def test_sensitivity_entrypoint_and_config_remain_present():
     from infrared_detection.compression.pruning import (
         build_yolo_dependency_graph,

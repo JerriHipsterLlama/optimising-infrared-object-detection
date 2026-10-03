@@ -1,0 +1,67 @@
+# YOLOv8n training configuration for the CAMEL infrared dataset.
+
+model:
+  name: "yolov8n"
+  pretrained: true
+  img_size: 336
+  device: 0
+
+training:
+  epochs: 200
+  batch_size: 32
+  learning_rate: 0.01
+  momentum: 0.937
+  weight_decay: 0.0005
+  warmup_epochs: 3
+  optimizer: "SGD"
+  patience: 30
+  num_workers: 4
+  ema: true
+  ema_tau: 0.999
+
+data:
+  dataset_path: "data/camel"
+  train_split: "train"
+  val_split: "val"
+  test_split: "test"
+  num_workers: 6
+  pin_memory: true
+  nc: 4
+  names: ["person", "bicycle", "vehicle", "dog"]
+
+augmentation:
+  degrees: 15.0
+  hsv_h: 0.0
+  hsv_v: 0.4
+  hsv_s: 0.0
+  translate: 0.1
+  scale: 0.5
+  fliplr: 0.5
+  flipud: 0.0
+  erasing: 0
+  mosaic: 1.0
+
+checkpoint:
+  save_interval: 5
+  resume_from: "models/checkpoints/yolov8n"
+  save_best: true
+  save_last: true
+
+logging:
+  log_file: "logs/train_yolov8n.log"
+  log_interval: 10
+  save_metrics: true
+  metrics_file: "logs/yolov8n_metrics.json"
+  tensorboard: false
+
+validation:
+  val_interval: 5
+  conf_threshold: 0.25
+  iou_threshold: 0.6
+
+export:
+  onnx: true
+  onnx_opset: 14
+  onnx_path: "models/weights/yolov8n.onnx"
+  tensorrt: false
+  tensorrt_path: "models/weights/yolov8n.trt"

@@ -1,0 +1,79 @@
+# Faster R-CNN with an ImageNet-pretrained ResNet-34-FPN backbone.
+
+model:
+  name: "faster_rcnn_resnet34_fpn"
+  backbone: "resnet34"
+  pretrained: true
+  img_size: 336
+  min_size: 336
+  max_size: 336
+  num_classes: 5
+  device: 0
+  trainable_layers: 5
+  compile: false
+
+training:
+  epochs: 200
+  batch_size: 16
+  learning_rate: 0.001
+  momentum: 0.937
+  weight_decay: 0.0005
+  warmup_epochs: 3
+  optimizer: "SGD"
+  patience: 30
+  max_grad_norm: 10.0
+  accumulation_steps: 1
+  ema: true
+  ema_tau: 0.999
+
+data:
+  dataset_path: "data/camel"
+  train_split: "train"
+  val_split: "val"
+  test_split: "test"
+  num_workers: 6
+  pin_memory: true
+  cache_images: false
+  prefetch_factor: 2
+  num_classes: 5
+  class_names: ["background", "person", "bicycle", "vehicle", "dog"]
+
+augmentation:
+  degrees: 15.0
+  horizontal_flip_p: 0.5
+  vertical_flip_p: 0.0
+  translation_limit: 0.1
+  scale_limit: 0.3
+  brightness_limit: 0.3
+  contrast_limit: 0.0
+  cutout_enabled: false
+  cutout_max_holes: 4
+  cutout_max_height: 20
+  cutout_max_width: 20
+  cutout_p: 0.4
+  mosaic_enabled: false
+
+checkpoint:
+  save_interval: 4
+  resume_from: "artifacts/checkpoints/faster_rcnn_resnet34"
+  save_best: true
+  save_last: true
+
+logging:
+  log_file: "logs/train_faster_rcnn_resnet34.log"
+  log_interval: 50
+  save_metrics: true
+  metrics_file: "logs/faster_rcnn_resnet34_metrics.json"
+  tensorboard: true
+
+validation:
+  val_interval: 5
+  conf_threshold: 0.25
+  iou_threshold: 0.5
+
+export:
+  onnx: true
+  onnx_opset: 14
+  onnx_path: "models/weights/faster_rcnn_resnet34.onnx"
+  tensorrt: false
+  tensorrt_path: "models/weights/faster_rcnn_resnet34.trt"

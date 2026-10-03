@@ -4,6 +4,7 @@
 
 model:
   name: "faster_rcnn_mobilenet_v3_large_fpn"
+  backbone: "resnet50"
   pretrained: true  # Use COCO pretrained weights (CRITICAL for convergence!)
   img_size: 336  # Native CAMEL image width (336x256 aspect ratio)
   min_size: 336
@@ -95,7 +96,7 @@ augmentation:
 
 checkpoint:
   save_interval: 4    # Save checkpoint every N epochs
-  resume_from: null   # Path to checkpoint to resume from
+  resume_from: "artifacts/checkpoints/faster_rcnn_resnet50"   # Path to checkpoint directory
   save_best: true     # Save best model
   save_last: true     # Save last model
 

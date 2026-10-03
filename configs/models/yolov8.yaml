@@ -64,15 +64,15 @@ augmentation:
 
 checkpoint:
   save_interval: 5    # Save checkpoint every N epochs
-  resume_from: "models/checkpoints/yolov8"   # Path to checkpoint directory
+  resume_from: "models/checkpoints/yolov8m"   # Path to checkpoint directory
   save_best: true     # Save best model
   save_last: true     # Save last model
 
 logging:
-  log_file: "logs/train_yolov8.log"
+  log_file: "logs/train_yolov8m.log"
   log_interval: 10  # Log metrics every N batches
   save_metrics: true
-  metrics_file: "logs/yolov8_metrics.json"
+  metrics_file: "logs/yolov8m_metrics.json"
   tensorboard: false  # Use tensorboard logging
 
 validation:
