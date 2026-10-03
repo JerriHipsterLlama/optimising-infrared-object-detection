@@ -109,13 +109,22 @@ def test_rtx_config_declares_manual_cluster_pruning_contract():
     pruning = config["pruning"]
 
     assert pruning["candidate_layers"] == [
-        "model.4.cv2.conv",
-        "model.6.cv2.conv",
+        "model.4.m.1.cv1.conv",
+        "model.5.conv",
+        "model.6.m.0.cv1.conv",
+        "model.6.m.1.cv1.conv",
+        "model.7.conv",
         "model.8.cv2.conv",
-        "model.12.cv2.conv",
-        "model.15.cv2.conv",
+        "model.8.m.0.cv1.conv",
+        "model.9.cv2.conv",
+        "model.12.m.0.cv1.conv",
+        "model.15.m.0.cv1.conv",
+        "model.16.conv",
         "model.18.cv2.conv",
+        "model.18.m.0.cv1.conv",
+        "model.19.conv",
         "model.21.cv2.conv",
+        "model.21.m.0.cv1.conv",
     ]
     assert pruning["cluster_size"] == 8
     assert pruning["prune_ratios"] == [0.10, 0.20, 0.30, 0.40, 0.50]
