@@ -14,6 +14,10 @@ from infrared_detection.evaluation.compression_matrix import (
     planned_variants,
     write_compression_manifest,
 )
+from infrared_detection.compression.pruning.importance import (
+    compute_channel_importance as score_all_modules,
+    minimum_weight_scores as score_one_module,
+)
 
 
 def test_matrix_planner_creates_three_dense_and_three_rows_per_prune_ratio():
@@ -294,3 +298,73 @@ def test_build_pruned_checkpoint_skips_zero_cluster_layers_and_prunes_eligible_l
     record = json.loads((tmp_path / "output" / "pruning_summary.json").read_text())
     assert record["prune_indices"] == {"0": [], "1": list(range(8))}
     assert record["skipped_layers"] == ["0"]
+
+
+@pytest.mark.parametrize(("ratio", "expected_channels"), [(0.25, 8), (0.5, 16)])
+def test_pruned_checkpoint_scores_only_target_layer_without_changing_cluster_order(
+    monkeypatch, tmp_path, ratio, expected_channels
+):
+    source_checkpoint = tmp_path / "dense.pt"
+    source_model = nn.Sequential(nn.Conv2d(3, 32, 1), nn.Conv2d(32, 16, 1))
+    with torch.no_grad():
+        source_model[0].weight.copy_(
+            torch.arange(32, dtype=torch.float32).reshape(32, 1, 1, 1).repeat(1, 3, 1, 1)
+        )
+    source_wrapper = SimpleNamespace(model=source_model)
+    source_wrapper.save = lambda path: torch.save(source_wrapper.model, path)
+    torch.save(source_model, source_checkpoint)
+    scored_modules = []
+    whole_model_scans = []
+
+    def score_target(module):
+        scored_modules.append(module)
+        return score_one_module(module)
+
+    def score_whole_model(model, graph=None, criterion="l1"):
+        whole_model_scans.append(model)
+        return score_all_modules(model, graph, criterion)
+
+    def load_yolo(checkpoint_path):
+        if Path(checkpoint_path) == source_checkpoint:
+            return source_wrapper
+        return SimpleNamespace(model=torch.load(checkpoint_path, weights_only=False))
+
+    def prune(model, example_input, layer, indices):
+        assert model is source_model
+        assert example_input.shape == (1, 3, 32, 32)
+        assert layer == "0"
+        assert indices == tuple(range(expected_channels))
+        return nn.Sequential(
+            nn.Conv2d(3, 32 - expected_channels, 1),
+            nn.Conv2d(32 - expected_channels, 16, 1),
+        )
+
+    monkeypatch.setattr(compression_matrix, "_load_yolo_checkpoint", load_yolo)
+    monkeypatch.setattr(compression_matrix, "run_filterwise_probe", prune)
+    monkeypatch.setattr(compression_matrix, "minimum_weight_scores", score_target, raising=False)
+    monkeypatch.setattr(compression_matrix, "compute_channel_importance", score_whole_model, raising=False)
+
+    output = build_pruned_checkpoint(
+        {
+            "model": {"checkpoint": str(source_checkpoint)},
+            "experiment": {"image_size": 32},
+            "pruning": {
+                "candidate_layers": ["0"],
+                "cluster_size": 8,
+                "prune_ratios": [0.25, 0.5],
+                "allowed_map50_95_drop": 0.02,
+                "importance": "minimum_weight",
+            },
+        },
+        tmp_path / "output",
+        requested_ratio=ratio,
+    )
+
+    summary = json.loads((output.parent / "pruning_summary.json").read_text())
+    assert scored_modules == [source_model[0]]
+    assert whole_model_scans == []
+    assert summary["prune_indices"] == {"0": list(range(expected_channels))}
+    assert [module.out_channels for module in torch.load(output, weights_only=False)] == [
+        32 - expected_channels,
+        16,
+    ]

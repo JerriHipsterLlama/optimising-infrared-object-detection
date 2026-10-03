@@ -11,7 +11,7 @@ from typing import Any, Callable, Mapping
 
 import yaml
 
-from infrared_detection.compression.pruning import compute_channel_importance
+from infrared_detection.compression.pruning.importance import minimum_weight_scores
 from infrared_detection.compression.pruning.cluster_selection import plan_low_importance_clusters
 from infrared_detection.compression.pruning.cluster_probe import run_filterwise_probe
 from infrared_detection.evaluation.artifacts import write_experiment_manifest, write_metrics_csv
@@ -125,11 +125,9 @@ def build_pruned_checkpoint(
             planned_clusters[layer] = []
             skipped_layers.append(layer)
             continue
-        scores = compute_channel_importance(pruned_model, criterion=str(importance))
-        if layer not in scores:
-            raise ValueError(f"No channel-importance scores are available for prunable layer {layer!r}.")
+        scores = minimum_weight_scores(module)
         specs = plan_low_importance_clusters(
-            {layer: scores[layer]}, cluster_size, set(), max_clusters_per_layer=clusters_to_remove
+            {layer: scores}, cluster_size, set(), max_clusters_per_layer=clusters_to_remove
         )
         if len(specs) != clusters_to_remove:
             raise ValueError(f"Could not plan complete low-importance clusters for {layer!r}.")
