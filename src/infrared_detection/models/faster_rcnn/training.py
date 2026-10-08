@@ -1028,7 +1028,9 @@ def export_onnx(model, config: dict, weights_dir: Path, device, logger):
             model.eval()
 
             # Create dummy input for ONNX export
-            dummy_input = torch.randn(1, 1, config['model']['img_size'], config['model']['img_size']).to(device)
+            dummy_input = torch.randn(
+                1, 3, config['model']['img_size'], config['model']['img_size']
+            ).to(device)
 
             # Export path
             onnx_path = weights_dir / "best.onnx"
@@ -1050,7 +1052,8 @@ def export_onnx(model, config: dict, weights_dir: Path, device, logger):
                 dynamic_axes={
                     'images': {0: 'batch_size'},
                     'output': {0: 'batch_size'}
-                }
+                },
+                dynamo=False,
             )
 
             logger.info(f"✓ ONNX export successful: {onnx_path}")

@@ -3,7 +3,11 @@ from collections import OrderedDict
 import torch
 
 from infrared_detection.models.faster_rcnn.backbones import ResNet34FPNBackbone
-from infrared_detection.models.faster_rcnn.training import build_faster_rcnn_model, collate_fn
+from infrared_detection.models.faster_rcnn.training import (
+    build_faster_rcnn_model,
+    collate_fn,
+    export_onnx,
+)
 
 
 def model_config(backbone: str, pretrained: bool = False) -> dict:
@@ -69,3 +73,52 @@ def test_faster_rcnn_collate_adapts_grayscale_images_to_three_channels():
     )
 
     assert images[0].shape == (3, 64, 64)
+
+
+def test_faster_rcnn_onnx_export_uses_three_channel_legacy_exporter(tmp_path, monkeypatch):
+    weights_dir = tmp_path / "weights"
+    weights_dir.mkdir()
+    (weights_dir / "best.pt").write_bytes(b"checkpoint")
+
+    captured = {}
+
+    class Logger:
+        def info(self, message):
+            pass
+
+        def warning(self, message):
+            pass
+
+        def error(self, message):
+            captured["error"] = message
+
+    class Model:
+        def load_state_dict(self, state_dict):
+            pass
+
+        def eval(self):
+            pass
+
+    monkeypatch.setattr(
+        torch,
+        "load",
+        lambda *args, **kwargs: {"model_state_dict": {}},
+    )
+
+    def fake_export(model, args, output_path, **kwargs):
+        captured["input"] = args
+        captured["kwargs"] = kwargs
+
+    monkeypatch.setattr(torch.onnx, "export", fake_export)
+
+    export_onnx(
+        Model(),
+        {"model": {"img_size": 64}, "export": {"onnx_opset": 14}},
+        weights_dir,
+        torch.device("cpu"),
+        Logger(),
+    )
+
+    assert captured["input"].shape == (1, 3, 64, 64)
+    assert captured["kwargs"]["dynamo"] is False
+    assert "error" not in captured
