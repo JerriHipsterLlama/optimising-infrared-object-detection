@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import csv
+import hashlib
 import json
 from pathlib import Path
 import sys
@@ -19,6 +20,7 @@ from infrared_detection.evaluation.accuracy_sensitivity import (
     AGGREGATE_FIELDS,
     DEFAULT_RATIOS,
     DETAILED_FIELDS,
+    LEGACY_DETAILED_FIELDS,
     SensitivityAdapters,
     ValidationMetrics,
     build_unit_rankings,
@@ -215,6 +217,27 @@ def test_resume_reuses_terminal_rows_retries_error_and_rejects_mismatch(tmp_path
         load_resume_artifacts(output, expected_fingerprint="different")
 
 
+def test_resume_backfills_recall_sensitivity_from_legacy_csv(tmp_path):
+    output = tmp_path / "legacy"
+    rows = [
+        {"candidate_id": "baseline", "status": "BASELINE", "recall": 0.9},
+        {"candidate_id": "unit@0.25", "status": "COMPLETED", "pruning_unit": "unit",
+         "requested_pruning_ratio": 0.25, "actual_pruning_ratio": 0.25,
+         "recall": 0.8},
+    ]
+    write_artifacts(output, rows, [], _manifest())
+    with (output / "results.csv").open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=LEGACY_DETAILED_FIELDS)
+        writer.writeheader()
+        writer.writerows(rows)
+
+    resumed = load_resume_artifacts(output, expected_fingerprint="abc")
+    candidate = next(row for row in resumed.rows if row["status"] == "COMPLETED")
+
+    assert float(candidate["recall_degradation"]) == pytest.approx(0.1)
+    assert float(candidate["recall_sensitivity"]) == pytest.approx(0.4)
+
+
 def test_experiment_fingerprint_changes_with_validation_or_input_metadata(tmp_path):
     config = load_sensitivity_config(_write_config(tmp_path))
     first = experiment_fingerprint(config, versions={"torch": "test"})
@@ -222,6 +245,63 @@ def test_experiment_fingerprint_changes_with_validation_or_input_metadata(tmp_pa
     assert first == same
     config.dataset_yaml.write_text("path: changed\n", encoding="utf-8")
     assert first != experiment_fingerprint(config, versions={"torch": "test"})
+
+
+def test_yolo_fingerprint_preserves_existing_resume_identity(tmp_path):
+    config = load_sensitivity_config(_write_config(tmp_path))
+    versions = {"torch": "test"}
+    payload = {
+        "checkpoint": {
+            "path": str(config.checkpoint), "size": config.checkpoint.stat().st_size,
+            "mtime_ns": config.checkpoint.stat().st_mtime_ns,
+        },
+        "dataset": {
+            "path": str(config.dataset_yaml), "size": config.dataset_yaml.stat().st_size,
+            "mtime_ns": config.dataset_yaml.stat().st_mtime_ns,
+        },
+        "split": config.split,
+        "validation": dict(config.validation),
+        "ratios": config.ratios,
+        "importance": config.importance,
+        "importance_version": "l1-filter-sum-v1",
+        "example_image_size": config.example_image_size,
+        "versions": versions,
+    }
+    expected = hashlib.sha256(
+        json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str).encode()
+    ).hexdigest()
+
+    assert experiment_fingerprint(config, versions=versions) == expected
+
+
+def test_faster_rcnn_fingerprint_changes_when_nested_split_data_changes(tmp_path):
+    checkpoint = tmp_path / "best.pt"
+    checkpoint.write_bytes(b"checkpoint")
+    model_config = tmp_path / "model.yaml"
+    model_config.write_text("model: {}\n", encoding="utf-8")
+    dataset_root = tmp_path / "camel"
+    images = dataset_root / "images" / "val"
+    labels = dataset_root / "labels_pascal" / "val"
+    images.mkdir(parents=True)
+    labels.mkdir(parents=True)
+    (images / "Seq01_000001.png").write_bytes(b"image")
+    label_file = labels / "Seq01_000001.txt"
+    label_file.write_text("0 0 0 1 1\n", encoding="utf-8")
+    config_path = tmp_path / "frcnn.yaml"
+    config_path.write_text(yaml.safe_dump({
+        "model": {"backend": "faster_rcnn", "checkpoint": str(checkpoint),
+                  "config": str(model_config)},
+        "data": {"dataset_root": str(dataset_root), "split": "val"},
+        "validation": {"device": "0"},
+        "pruning": {"ratios": [0.25], "importance": "l1", "example_image_size": 32},
+        "experiment": {"output_dir": str(tmp_path / "out")},
+    }), encoding="utf-8")
+    config = load_sensitivity_config(config_path)
+    before = experiment_fingerprint(config, versions={"torch": "test"})
+
+    label_file.write_text("0 0 0 2 2\n", encoding="utf-8")
+
+    assert experiment_fingerprint(config, versions={"torch": "test"}) != before
 
 
 class FakeModel(nn.Module):
@@ -319,6 +399,8 @@ def test_baseline_and_candidates_receive_identical_validation_arguments(tmp_path
     assert completed["actual_remaining_channels"] == 7
     assert completed["actual_pruning_ratio"] == 0.125
     assert completed["touched_modules"] == "unit"
+    assert completed["recall_degradation"] == pytest.approx(0.0)
+    assert completed["recall_sensitivity"] == pytest.approx(0.0)
 
 
 def test_nonvalid_structural_rows_are_not_evaluated_and_next_candidate_continues(tmp_path):

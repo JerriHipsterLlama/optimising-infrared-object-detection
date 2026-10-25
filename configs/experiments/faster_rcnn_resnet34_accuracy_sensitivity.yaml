@@ -1,0 +1,20 @@
+model:
+  backend: faster_rcnn
+  checkpoint: artifacts/checkpoints/faster_rcnn_resnet34/resnet34-baseline/weights/best.pt
+  config: configs/models/faster_rcnn_resnet34.yaml
+data:
+  dataset_root: data/camel
+  split: val
+validation:
+  device: "0"
+  batch_size: 1
+  workers: 0
+  conf_threshold: 0.25
+  iou_threshold: 0.5
+  half: false
+pruning:
+  ratios: [0.125, 0.25, 0.375, 0.5]
+  importance: l1
+  example_image_size: 336
+experiment:
+  output_dir: runs/experiments/faster_rcnn_resnet34_accuracy_sensitivity

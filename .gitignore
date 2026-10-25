@@ -7,7 +7,14 @@ build/**
 /models/**
 .superpowers/*
 .worktrees/
-docs/superpowers/*
+docs/*
+tools/*
+node_modules
+outputs/
+tests/*
+Ultralytics/*
+.pytest-*
+tmp/*
 
 # Generated model and inference artifacts; retain directory placeholders.
 artifacts/**

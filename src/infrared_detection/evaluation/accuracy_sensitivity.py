@@ -33,9 +33,18 @@ DETAILED_FIELDS = (
     "original_channels", "requested_pruned_channels", "requested_remaining_channels",
     "actual_remaining_channels", "requested_pruning_ratio", "actual_pruning_ratio",
     "map50_95", "map50", "precision", "recall", "map50_95_change_from_baseline",
-    "accuracy_degradation", "point_sensitivity", "touched_modules",
+    "accuracy_degradation", "point_sensitivity", "recall_degradation",
+    "recall_sensitivity", "touched_modules",
     "dependency_group_json", "status_reason", "error", "checkpoint", "dataset",
     "split", "importance", "validation_fingerprint", "elapsed_validation_seconds",
+    "inference_ms_per_image",
+)
+PRE_LATENCY_DETAILED_FIELDS = tuple(
+    field for field in DETAILED_FIELDS if field != "inference_ms_per_image"
+)
+LEGACY_DETAILED_FIELDS = tuple(
+    field for field in PRE_LATENCY_DETAILED_FIELDS
+    if field not in {"recall_degradation", "recall_sensitivity"}
 )
 
 
@@ -43,11 +52,12 @@ def aggregate_fields(ratios: Sequence[float]) -> tuple[str, ...]:
     fields = [
         "rank", "pruning_unit", "architectural_region", "curve_status",
         "original_channels", "successful_ratio_count", "maximum_achieved_ratio",
-        "normalized_auc_sensitivity",
+        "normalized_auc_sensitivity", "normalized_auc_recall_sensitivity",
     ]
     for ratio in ratios:
         slug = format(float(ratio), "g").replace(".", "_")
-        fields.extend((f"map50_95_at_{slug}", f"degradation_at_{slug}"))
+        fields.extend((f"map50_95_at_{slug}", f"degradation_at_{slug}",
+                       f"recall_at_{slug}", f"recall_degradation_at_{slug}"))
     return tuple(fields)
 
 
@@ -59,18 +69,23 @@ class PointMetrics:
     accuracy_degradation: float
     map50_95_change_from_baseline: float
     point_sensitivity: float
+    recall_degradation: float | None = None
+    recall_sensitivity: float | None = None
 
 
 @dataclass(frozen=True)
 class SensitivityConfig:
     checkpoint: Path
-    dataset_yaml: Path
+    dataset_yaml: Path | None
     split: str
     validation: Mapping[str, Any]
     ratios: tuple[float, ...]
     importance: str
     example_image_size: int
     output_dir: Path
+    backend: str = "yolov8n"
+    model_config: Path | None = None
+    dataset_root: Path | None = None
 
 
 @dataclass(frozen=True)
@@ -86,13 +101,25 @@ class ValidationMetrics:
     map50: float
     precision: float
     recall: float
+    inference_ms_per_image: float | None = None
 
 
 @dataclass(frozen=True)
 class SensitivityAdapters:
     @classmethod
-    def defaults(cls) -> "SensitivityAdapters":
-        """Build production Ultralytics and Torch-Pruning operations lazily."""
+    def defaults(
+        cls, backend: str = "yolov8n", config: SensitivityConfig | None = None
+    ) -> "SensitivityAdapters":
+        """Build the requested model backend and Torch-Pruning operations lazily."""
+
+        if backend == "faster_rcnn":
+            if config is None:
+                raise ValueError("Faster R-CNN adapters require a loaded screening config.")
+            from infrared_detection.evaluation.faster_rcnn_sensitivity import make_adapters
+
+            return make_adapters(config)
+        if backend != "yolov8n":
+            raise ValueError(f"Unsupported sensitivity backend: {backend}")
 
         def load_model(checkpoint: Path) -> Any:
             from infrared_detection.evaluation.single_layer_performance_screening import (
@@ -175,16 +202,26 @@ def calculate_point_metrics(
     baseline_map50_95: float,
     candidate_map50_95: float,
     actual_pruning_ratio: float,
+    *,
+    baseline_recall: float | None = None,
+    candidate_recall: float | None = None,
 ) -> PointMetrics:
     """Calculate signed degradation, change, and ratio-normalized sensitivity."""
 
     if actual_pruning_ratio <= 0:
         raise ValueError("Achieved pruning ratio must be positive.")
     degradation = float(baseline_map50_95) - float(candidate_map50_95)
+    recall_degradation = (
+        None if baseline_recall is None or candidate_recall is None
+        else float(baseline_recall) - float(candidate_recall)
+    )
     return PointMetrics(
         accuracy_degradation=degradation,
         map50_95_change_from_baseline=-degradation,
         point_sensitivity=degradation / float(actual_pruning_ratio),
+        recall_degradation=recall_degradation,
+        recall_sensitivity=(None if recall_degradation is None
+                            else recall_degradation / float(actual_pruning_ratio)),
     )
 
 
@@ -220,12 +257,31 @@ def load_sensitivity_config(config_path: str | Path) -> SensitivityConfig:
     payload = yaml.safe_load(path.read_text(encoding="utf-8"))
     if not isinstance(payload, dict):
         raise ValueError("Sensitivity configuration must be a mapping.")
-    checkpoint = _resolved_path(payload["model"]["checkpoint"])
-    dataset = _resolved_path(payload["data"]["dataset_yaml"])
+    model_config = payload["model"]
+    data_config = payload["data"]
+    backend = str(model_config.get("backend", "yolov8n")).lower()
+    if backend not in {"yolov8n", "faster_rcnn"}:
+        raise ValueError("Sensitivity backend must be 'yolov8n' or 'faster_rcnn'.")
+    checkpoint = _resolved_path(model_config["checkpoint"])
+    dataset_yaml_value = data_config.get("dataset_yaml")
+    dataset = _resolved_path(dataset_yaml_value) if dataset_yaml_value else None
+    model_config_path = (
+        _resolved_path(model_config["config"])
+        if backend == "faster_rcnn" and model_config.get("config") else None
+    )
+    dataset_root = (
+        _resolved_path(data_config["dataset_root"])
+        if backend == "faster_rcnn" and data_config.get("dataset_root") else None
+    )
     if not checkpoint.is_file():
         raise FileNotFoundError(f"Checkpoint does not exist: {checkpoint}")
-    if not dataset.is_file():
+    if backend == "yolov8n" and (dataset is None or not dataset.is_file()):
         raise FileNotFoundError(f"Dataset YAML does not exist: {dataset}")
+    if backend == "faster_rcnn":
+        if model_config_path is None or not model_config_path.is_file():
+            raise FileNotFoundError(f"Faster R-CNN model config does not exist: {model_config_path}")
+        if dataset_root is None or not dataset_root.is_dir():
+            raise FileNotFoundError(f"Faster R-CNN dataset root does not exist: {dataset_root}")
     ratios = tuple(float(value) for value in payload["pruning"]["ratios"])
     if not ratios or len(set(ratios)) != len(ratios) or any(
         not 0.0 < ratio < 1.0 for ratio in ratios
@@ -257,12 +313,37 @@ def load_sensitivity_config(config_path: str | Path) -> SensitivityConfig:
         importance=importance,
         example_image_size=example_size,
         output_dir=_resolved_path(payload["experiment"]["output_dir"]),
+        backend=backend,
+        model_config=model_config_path,
+        dataset_root=dataset_root,
     )
 
 
 def _file_identity(path: Path) -> dict[str, Any]:
     stat = path.stat()
     return {"path": str(path), "size": stat.st_size, "mtime_ns": stat.st_mtime_ns}
+
+
+def _dataset_split_identity(root: Path, split: str) -> dict[str, Any]:
+    files = sorted(
+        path
+        for directory in (root / "images" / split, root / "labels_pascal" / split)
+        if directory.is_dir()
+        for path in directory.rglob("*")
+        if path.is_file()
+    )
+    return {
+        "root": str(root),
+        "split": split,
+        "files": [
+            {
+                "path": path.relative_to(root).as_posix(),
+                "size": path.stat().st_size,
+                "mtime_ns": path.stat().st_mtime_ns,
+            }
+            for path in files
+        ],
+    }
 
 
 def experiment_fingerprint(
@@ -272,7 +353,10 @@ def experiment_fingerprint(
 ) -> str:
     payload = {
         "checkpoint": _file_identity(config.checkpoint),
-        "dataset": _file_identity(config.dataset_yaml),
+        "dataset": (
+            _file_identity(config.dataset_yaml) if config.dataset_yaml is not None
+            else _dataset_split_identity(config.dataset_root, config.split)
+        ),
         "split": config.split,
         "validation": dict(config.validation),
         "ratios": config.ratios,
@@ -281,6 +365,9 @@ def experiment_fingerprint(
         "example_image_size": config.example_image_size,
         "versions": dict(versions),
     }
+    if config.backend != "yolov8n":
+        payload["backend"] = config.backend
+        payload["model_config"] = _file_identity(config.model_config)
     canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str)
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
@@ -354,9 +441,31 @@ def load_resume_artifacts(
         raise ValueError("Experiment fingerprint does not match saved artifacts.")
     with paths[0].open(newline="", encoding="utf-8") as handle:
         reader = csv.DictReader(handle)
-        if tuple(reader.fieldnames or ()) != DETAILED_FIELDS:
+        if tuple(reader.fieldnames or ()) not in {
+            DETAILED_FIELDS, PRE_LATENCY_DETAILED_FIELDS, LEGACY_DETAILED_FIELDS,
+        }:
             raise ValueError("Detailed result CSV header does not match this tool version.")
-        rows = tuple(dict(row) for row in reader)
+        loaded_rows = [
+            {**dict(row), **{field: "" for field in DETAILED_FIELDS if field not in row}}
+            for row in reader
+        ]
+    baseline_recall = next(
+        (float(row["recall"]) for row in loaded_rows
+         if row.get("status") == "BASELINE" and row.get("recall") not in (None, "")),
+        None,
+    )
+    if baseline_recall is not None:
+        for row in loaded_rows:
+            if row.get("status") != "COMPLETED" or row.get("recall") in (None, ""):
+                continue
+            if row.get("recall_degradation") in (None, ""):
+                row["recall_degradation"] = baseline_recall - float(row["recall"])
+            if (row.get("recall_sensitivity") in (None, "")
+                    and row.get("actual_pruning_ratio") not in (None, "")):
+                ratio = float(row["actual_pruning_ratio"])
+                if ratio > 0:
+                    row["recall_sensitivity"] = float(row["recall_degradation"]) / ratio
+    rows = tuple(loaded_rows)
     reusable_statuses = {"BASELINE", "COMPLETED", "GROUPED", "INVALID", "SEMANTICS_CHANGED"}
     reusable = {
         row["candidate_id"] for row in rows if row.get("status") in reusable_statuses
@@ -366,6 +475,9 @@ def load_resume_artifacts(
 
 def _validation_arguments(config: SensitivityConfig) -> dict[str, Any]:
     arguments = dict(config.validation)
+    if config.backend == "faster_rcnn":
+        arguments.update(split=config.split)
+        return arguments
     arguments.update(
         data=str(config.dataset_yaml),
         split=config.split,
@@ -384,8 +496,9 @@ def _baseline_row(config: SensitivityConfig, metrics: ValidationMetrics) -> dict
         "map50": metrics.map50,
         "precision": metrics.precision,
         "recall": metrics.recall,
+        "inference_ms_per_image": metrics.inference_ms_per_image,
         "checkpoint": str(config.checkpoint),
-        "dataset": str(config.dataset_yaml),
+        "dataset": str(config.dataset_yaml or config.dataset_root),
         "split": config.split,
         "importance": config.importance,
     }
@@ -424,7 +537,7 @@ def _probe_row(
         "status_reason": probe.reason,
         "error": probe.error,
         "checkpoint": str(config.checkpoint),
-        "dataset": str(config.dataset_yaml),
+        "dataset": str(config.dataset_yaml or config.dataset_root),
         "split": config.split,
         "importance": config.importance,
         "validation_fingerprint": validation_fingerprint,
@@ -439,13 +552,20 @@ def run_accuracy_sensitivity(
 ) -> list[dict[str, Any]]:
     """Run independent dense-checkpoint structural sensitivity experiments."""
 
-    if adapters is None:
-        adapters = SensitivityAdapters.defaults()
     config = load_sensitivity_config(config_path)
+    if adapters is None:
+        adapters = SensitivityAdapters.defaults(config.backend, config)
     versions = dict(adapters.versions())
     fingerprint = experiment_fingerprint(config, versions=versions)
     resume = load_resume_artifacts(config.output_dir, expected_fingerprint=fingerprint)
     rows_by_id = {row["candidate_id"]: dict(row) for row in resume.rows}
+    reusable_candidate_ids = set(resume.reusable_candidate_ids)
+    if config.backend == "faster_rcnn":
+        reusable_candidate_ids = {
+            candidate_id for candidate_id in reusable_candidate_ids
+            if rows_by_id[candidate_id].get("status") not in {"BASELINE", "COMPLETED"}
+            or rows_by_id[candidate_id].get("inference_ms_per_image") not in (None, "")
+        }
     validation = _validation_arguments(config)
     validation_fingerprint = hashlib.sha256(
         json.dumps(validation, sort_keys=True, separators=(",", ":"), default=str).encode("utf-8")
@@ -453,7 +573,8 @@ def run_accuracy_sensitivity(
 
     baseline_wrapper = adapters.load_model(config.checkpoint)
     baseline_model = adapters.unwrap_model(baseline_wrapper)
-    validate_yolov8n_model(baseline_model)
+    if config.backend == "yolov8n":
+        validate_yolov8n_model(baseline_model)
     units = adapters.discover_units(baseline_model)
     baseline_example = adapters.make_example_input(baseline_model, config.example_image_size)
     baseline_contract = None
@@ -464,7 +585,12 @@ def run_accuracy_sensitivity(
         )
 
     baseline = rows_by_id.get("baseline")
-    if baseline is None or baseline.get("status") != "BASELINE":
+    if (
+        baseline is None
+        or baseline.get("status") != "BASELINE"
+        or (config.backend == "faster_rcnn"
+            and baseline.get("inference_ms_per_image") in (None, ""))
+    ):
         baseline_metrics = adapters.evaluate(baseline_wrapper, validation)
         baseline = _baseline_row(config, baseline_metrics)
         baseline["validation_fingerprint"] = validation_fingerprint
@@ -478,6 +604,7 @@ def run_accuracy_sensitivity(
         "versions": versions,
         "baseline": dict(baseline),
         "detect_contract": None if baseline_contract is None else baseline_contract.__dict__,
+        "backend": config.backend,
         "units": [unit.__dict__ for unit in units],
         "ratios": list(config.ratios),
         "importance": config.importance,
@@ -494,12 +621,13 @@ def run_accuracy_sensitivity(
     for unit in units:
         for ratio in config.ratios:
             candidate_id = _candidate_id(unit.name, ratio)
-            if candidate_id in resume.reusable_candidate_ids:
+            if candidate_id in reusable_candidate_ids:
                 continue
             try:
                 wrapper = adapters.load_model(config.checkpoint)
                 dense_model = adapters.unwrap_model(wrapper)
-                validate_yolov8n_model(dense_model)
+                if config.backend == "yolov8n":
+                    validate_yolov8n_model(dense_model)
                 example = adapters.make_example_input(dense_model, config.example_image_size)
                 probe = adapters.probe(
                     dense_model,
@@ -521,11 +649,14 @@ def run_accuracy_sensitivity(
                         map50=metrics.map50,
                         precision=metrics.precision,
                         recall=metrics.recall,
+                        inference_ms_per_image=metrics.inference_ms_per_image,
                     )
                     point = calculate_point_metrics(
                         baseline_map,
                         metrics.map50_95,
                         float(probe.actual_pruning_ratio),
+                        baseline_recall=_float_value(baseline, "recall"),
+                        candidate_recall=metrics.recall,
                     )
                     row.update(point.__dict__)
             except Exception as error:
@@ -539,7 +670,7 @@ def run_accuracy_sensitivity(
                     "status_reason": "runtime_error",
                     "error": str(error),
                     "checkpoint": str(config.checkpoint),
-                    "dataset": str(config.dataset_yaml),
+                    "dataset": str(config.dataset_yaml or config.dataset_root),
                     "split": config.split,
                     "importance": config.importance,
                     "validation_fingerprint": validation_fingerprint,
@@ -598,6 +729,7 @@ def build_unit_rankings(
             "successful_ratio_count": len(completed),
             "maximum_achieved_ratio": None,
             "normalized_auc_sensitivity": None,
+            "normalized_auc_recall_sensitivity": None,
         }
         for ratio in expected:
             point = by_requested.get(ratio)
@@ -606,13 +738,33 @@ def build_unit_rankings(
             aggregate_row[f"degradation_at_{slug}"] = (
                 None if point is None else point.get("accuracy_degradation")
             )
+            aggregate_row[f"recall_at_{slug}"] = None if point is None else point.get("recall")
+            aggregate_row[f"recall_degradation_at_{slug}"] = (
+                None if point is None else point.get("recall_degradation")
+            )
         if complete:
             points = [
                 (float(by_requested[ratio]["actual_pruning_ratio"]), float(by_requested[ratio]["accuracy_degradation"]))
                 for ratio in expected
             ]
-            aggregate_row["maximum_achieved_ratio"] = max(ratio for ratio, _drop in points)
-            aggregate_row["normalized_auc_sensitivity"] = normalized_degradation_auc(points)
+            try:
+                map_auc = normalized_degradation_auc(points)
+                recall_points = [
+                    (float(by_requested[ratio]["actual_pruning_ratio"]),
+                     float(by_requested[ratio]["recall_degradation"]))
+                    for ratio in expected
+                    if by_requested[ratio].get("recall_degradation") not in (None, "")
+                ]
+                recall_auc = (
+                    normalized_degradation_auc(recall_points)
+                    if len(recall_points) == len(expected) else None
+                )
+            except ValueError:
+                aggregate_row["curve_status"] = "INVALID_ACHIEVED_RATIOS"
+            else:
+                aggregate_row["maximum_achieved_ratio"] = max(ratio for ratio, _drop in points)
+                aggregate_row["normalized_auc_sensitivity"] = map_auc
+                aggregate_row["normalized_auc_recall_sensitivity"] = recall_auc
         aggregate.append(aggregate_row)
 
     complete_rows = sorted(

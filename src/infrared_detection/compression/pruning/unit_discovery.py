@@ -10,12 +10,16 @@ from typing import Any, Callable, Literal
 import torch
 from torch import nn
 
-from .dependency_graph import DependencyGraph, build_yolo_dependency_graph
+from .dependency_graph import (
+    DependencyGraph,
+    build_faster_rcnn_dependency_graph,
+    build_yolo_dependency_graph,
+)
 from .importance import rank_output_channels
 from .yolo_pruner import synchronize_module_channel_metadata
 
 
-Region = Literal["backbone", "neck", "detect_head"]
+Region = Literal["backbone", "neck", "detect_head", "rpn", "roi_head"]
 
 
 @dataclass(frozen=True)
@@ -38,6 +42,13 @@ class DetectContract:
     reg_max: int
     no: int
     nl: int
+
+
+@dataclass(frozen=True)
+class FasterRCNNContract:
+    batch_size: int
+    num_classes: int
+    required_keys: tuple[str, ...] = ("boxes", "labels", "scores")
 
 
 @dataclass(frozen=True)
@@ -125,6 +136,69 @@ def discover_pruning_units(model: nn.Module) -> tuple[PruningUnit, ...]:
             region = "backbone"
         units.append(PruningUnit(name, region, int(module.weight.shape[0])))
     return tuple(units)
+
+
+def discover_faster_rcnn_pruning_units(model: nn.Module) -> tuple[PruningUnit, ...]:
+    """Enumerate Faster R-CNN convolution roots and identify their regions."""
+
+    prefixes = (
+        ("backbone.body.", "backbone"),
+        ("backbone.fpn.", "neck"),
+        ("rpn.", "rpn"),
+        ("roi_heads.", "roi_head"),
+    )
+    units = []
+    for name, module in model.named_modules():
+        if not isinstance(module, nn.Conv2d):
+            continue
+        region = next((region for prefix, region in prefixes if name.startswith(prefix)), None)
+        if region is None:
+            raise ValueError(f"Cannot assign Faster R-CNN region to convolution {name!r}.")
+        units.append(PruningUnit(name, region, int(module.weight.shape[0])))
+    if not units:
+        raise ValueError("Faster R-CNN model contains no convolutional pruning candidates.")
+    return tuple(units)
+
+
+def capture_faster_rcnn_contract(
+    model: nn.Module, output: object
+) -> FasterRCNNContract:
+    """Validate and describe torchvision detector outputs independent of box count."""
+
+    if not isinstance(output, list) or not output:
+        raise ValueError("Expected Faster R-CNN evaluation output as a nonempty list.")
+    predictor = getattr(getattr(model, "roi_heads", None), "box_predictor", None)
+    classifier = getattr(predictor, "cls_score", None)
+    num_classes = getattr(classifier, "out_features", None)
+    if not isinstance(num_classes, int) or num_classes < 2:
+        raise ValueError("Cannot determine Faster R-CNN foreground class count.")
+    for prediction in output:
+        if not isinstance(prediction, dict):
+            raise ValueError("Each Faster R-CNN prediction must be a mapping.")
+        if any(key not in prediction for key in ("boxes", "labels", "scores")):
+            raise ValueError("Faster R-CNN predictions require boxes, labels, and scores.")
+        boxes, labels, scores = (prediction[key] for key in ("boxes", "labels", "scores"))
+        if (not isinstance(boxes, torch.Tensor) or boxes.ndim != 2 or boxes.shape[1] != 4
+                or not isinstance(labels, torch.Tensor) or labels.ndim != 1
+                or not isinstance(scores, torch.Tensor) or scores.ndim != 1
+                or len(boxes) != len(labels) or len(boxes) != len(scores)):
+            raise ValueError("Faster R-CNN prediction tensor shapes are inconsistent.")
+        if not torch.isfinite(boxes).all() or not torch.isfinite(scores).all():
+            raise ValueError("Faster R-CNN predictions contain non-finite values.")
+        if labels.numel() and ((labels < 1).any() or (labels >= num_classes).any()):
+            raise ValueError("Faster R-CNN output labels violate foreground class semantics.")
+    return FasterRCNNContract(len(output), num_classes)
+
+
+def validate_faster_rcnn_contract(
+    expected: FasterRCNNContract, model: nn.Module, output: object
+) -> FasterRCNNContract:
+    """Reject structurally pruned models that alter detector output semantics."""
+
+    actual = capture_faster_rcnn_contract(model, output)
+    if actual != expected:
+        raise ValueError(f"Faster R-CNN contract changed: expected {expected!r}, got {actual!r}.")
+    return actual
 
 
 def _detect_module(model: nn.Module) -> nn.Module:
@@ -227,6 +301,15 @@ def _touched_modules(operations: tuple[DependencyOperation, ...]) -> tuple[str, 
     return tuple(dict.fromkeys(operation.module_name for operation in operations))
 
 
+def _has_unresolved_dependency_target(operations: tuple[DependencyOperation, ...]) -> bool:
+    supported_functional_ops = {"_ElementWiseOp"}
+    return any(
+        operation.module_name.startswith("$op:")
+        and operation.module_type not in supported_functional_ops
+        for operation in operations
+    )
+
+
 def _has_coupled_output(
     model: nn.Module,
     unit_name: str,
@@ -298,12 +381,9 @@ def validate_and_prune_unit(
         prune_count = requested_prune_count(original_channels, ratio)
     except ValueError as error:
         return _empty_probe(
-            status="INVALID",
-            unit_name=unit_name,
-            original_channels=original_channels,
-            ratio=ratio,
-            reason="insufficient_channels",
-            error=str(error),
+            status="INVALID", unit_name=unit_name,
+            original_channels=original_channels, ratio=ratio,
+            reason="insufficient_channels", error=str(error),
         )
     requested_remaining = original_channels - prune_count
 
@@ -314,9 +394,7 @@ def validate_and_prune_unit(
         prune_indices = [index for index, _score in ranked[:prune_count]]
         dependency = graph_builder(model, example_input)
         group = dependency.graph.get_pruning_group(
-            root,
-            tp.prune_conv_out_channels,
-            idxs=prune_indices,
+            root, tp.prune_conv_out_channels, idxs=prune_indices
         )
         operations = _dependency_operations(model, group)
         touched = _touched_modules(operations)
@@ -351,9 +429,10 @@ def validate_and_prune_unit(
                 validate_detect_contract(baseline_contract, model, output)
             except ValueError as error:
                 return StructuralProbe(
-                    "SEMANTICS_CHANGED", unit_name, original_channels, prune_count,
-                    requested_remaining, actual_remaining, ratio, actual_ratio,
-                    operations, touched, "detect_contract_changed", str(error), None,
+                    "SEMANTICS_CHANGED", unit_name, original_channels,
+                    prune_count, requested_remaining, actual_remaining, ratio,
+                    actual_ratio, operations, touched,
+                    "detect_contract_changed", str(error), None,
                 )
         return StructuralProbe(
             "VALID", unit_name, original_channels, prune_count,
@@ -364,5 +443,99 @@ def validate_and_prune_unit(
         return StructuralProbe(
             "INVALID", unit_name, original_channels, prune_count,
             requested_remaining, None, ratio, None, (), (),
+            "dependency_or_forward_failure", str(error), None,
+        )
+
+
+def validate_and_prune_faster_rcnn_unit(
+    model: nn.Module,
+    example_input: torch.Tensor,
+    unit_name: str,
+    ratio: float,
+    baseline_contract: FasterRCNNContract | None,
+    *,
+    criterion: str = "l1",
+    graph_builder: Callable[[nn.Module, torch.Tensor], DependencyGraph] = build_faster_rcnn_dependency_graph,
+) -> StructuralProbe:
+    """Independently prune one Faster R-CNN convolution and validate its contract."""
+
+    modules = dict(model.named_modules())
+    root = modules.get(unit_name)
+    if not isinstance(root, nn.Conv2d):
+        return _empty_probe(
+            status="INVALID", unit_name=unit_name,
+            original_channels=0, ratio=ratio, reason="missing_convolution",
+        )
+    original_channels = int(root.weight.shape[0])
+    try:
+        prune_count = requested_prune_count(original_channels, ratio)
+    except ValueError as error:
+        return _empty_probe(
+            status="INVALID", unit_name=unit_name,
+            original_channels=original_channels, ratio=ratio,
+            reason="insufficient_channels", error=str(error),
+        )
+    remaining = original_channels - prune_count
+
+    try:
+        import torch_pruning as tp
+
+        ranked = rank_output_channels(root, criterion=criterion)
+        indices = [index for index, _score in ranked[:prune_count]]
+        dependency = graph_builder(model, example_input)
+        group = dependency.graph.get_pruning_group(root, tp.prune_conv_out_channels, idxs=indices)
+        operations = _dependency_operations(model, group)
+        touched = _touched_modules(operations)
+        if not dependency.graph.check_pruning_group(group):
+            return StructuralProbe(
+                "INVALID", unit_name, original_channels, prune_count,
+                remaining, None, ratio, None, operations, touched,
+                "dependency_group_rejected", None, None,
+            )
+        if _has_unresolved_dependency_target(operations):
+            return StructuralProbe(
+                "GROUPED", unit_name, original_channels, prune_count,
+                remaining, None, ratio, None, operations, touched,
+                "unresolved_dependency_target", None, None,
+            )
+        if _has_coupled_output(model, unit_name, operations):
+            return StructuralProbe(
+                "GROUPED", unit_name, original_channels, prune_count,
+                remaining, None, ratio, None, operations, touched,
+                "coupled_output_channels", None, None,
+            )
+
+        group.prune()
+        synchronize_module_channel_metadata(model)
+        actual_remaining = int(root.weight.shape[0])
+        actual_ratio = (original_channels - actual_remaining) / original_channels
+        if actual_remaining != remaining:
+            return StructuralProbe(
+                "INVALID", unit_name, original_channels, prune_count,
+                remaining, actual_remaining, ratio, actual_ratio,
+                operations, touched, "unexpected_channel_count", None, None,
+            )
+        model.eval()
+        with torch.inference_mode():
+            output = model([example_input])
+        if baseline_contract is not None:
+            try:
+                validate_faster_rcnn_contract(baseline_contract, model, output)
+            except ValueError as error:
+                return StructuralProbe(
+                    "SEMANTICS_CHANGED", unit_name, original_channels,
+                    prune_count, remaining, actual_remaining, ratio,
+                    actual_ratio, operations, touched,
+                    "detector_contract_changed", str(error), None,
+                )
+        return StructuralProbe(
+            "VALID", unit_name, original_channels, prune_count,
+            remaining, actual_remaining, ratio, actual_ratio,
+            operations, touched, None, None, model,
+        )
+    except Exception as error:
+        return StructuralProbe(
+            "INVALID", unit_name, original_channels, prune_count,
+            remaining, None, ratio, None, (), (),
             "dependency_or_forward_failure", str(error), None,
         )

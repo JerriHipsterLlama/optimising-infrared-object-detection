@@ -36,3 +36,27 @@ def build_yolo_dependency_graph(model: nn.Module, example_input: torch.Tensor) -
         if isinstance(module, (nn.Conv2d, nn.Linear))
     }
     return DependencyGraph(model=model, graph=graph, modules=modules)
+
+
+def build_faster_rcnn_dependency_graph(
+    model: nn.Module, example_input: torch.Tensor
+) -> DependencyGraph:
+    """Build a graph for torchvision detectors, whose input is a list of images."""
+
+    try:
+        import torch_pruning as tp
+    except ImportError as exc:
+        raise RuntimeError(
+            "Structured pruning requires torch-pruning. Install the project dependency before pruning."
+        ) from exc
+
+    model.requires_grad_(True)
+    graph = tp.DependencyGraph().build_dependency(
+        model, example_inputs=([example_input],)
+    )
+    modules = {
+        name: module
+        for name, module in model.named_modules()
+        if isinstance(module, (nn.Conv2d, nn.Linear))
+    }
+    return DependencyGraph(model=model, graph=graph, modules=modules)
