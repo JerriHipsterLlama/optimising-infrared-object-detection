@@ -126,6 +126,14 @@ python apps/single_layer_performance_screening.py --config configs/experiments/s
 
 Each configuration writes a resumable `results.csv` beneath `runs/experiments/single_layer_performance_screening/<model>/<hardware>/`. Its leading columns show the candidate, status, filters remaining, mAP50–95, and latency so progress can be inspected while the sweep runs. Latency is direct PyTorch CUDA forward latency on the named device; this sensitivity workflow deliberately produces no ONNX, TensorRT, or other deployment exports.
 
+The same command supports Faster R-CNN with `model.backend: faster_rcnn`. Its config uses `model.checkpoint`, `model.config`, `data.dataset_root`, `data.split`, the shared `experiment` and `runtime` settings, and `screening.layer_patterns` for the exact Conv2d names selected by rough structural screening. Set `experiment.image_size` to the Faster R-CNN model's configured input size. The ResNet34 config uses the 16 `COMPLETE` candidates from the rough screen:
+
+```powershell
+python apps/single_layer_performance_screening.py --config configs/experiments/single_layer_performance_faster_rcnn_resnet34_rtx.yaml
+```
+
+Candidates whose dependency group would prune another module's output channels are written as `skipped` with reason `unscorable`; remaining ranks for that layer are skipped, and screening proceeds to the next candidate layer.
+
 ### YOLOv8n structural-pruning accuracy sensitivity
 
 Run the standalone FP32 workstation screen with:

@@ -185,6 +185,31 @@ def test_experiment_fingerprint_uses_canonical_config_and_input_file_metadata(tm
     assert fingerprint != experiment_fingerprint(config, checkpoint, dataset)
 
 
+def test_experiment_fingerprint_includes_detector_backend_model_config_and_split(tmp_path):
+    checkpoint = tmp_path / "model.pt"
+    dataset = tmp_path / "camel"
+    model_config = tmp_path / "faster-rcnn.yaml"
+    checkpoint.write_bytes(b"weights")
+    dataset.mkdir()
+    model_config.write_text("model: {backbone: resnet34}\n", encoding="utf-8")
+    config = {
+        "model": {"backend": "faster_rcnn", "config": str(model_config)},
+        "experiment": {"model_variant": "resnet34", "hardware_label": "rtx", "image_size": 336},
+        "runtime": {"precision": "fp32"},
+        "data": {"split": "val"},
+        "screening": {"layer_patterns": ["backbone.body.layer1.*"]},
+    }
+
+    fingerprint = experiment_fingerprint(config, checkpoint, dataset)
+    other_model_config = tmp_path / "other.yaml"
+    other_model_config.write_text("model: {backbone: resnet50}\n", encoding="utf-8")
+    changed_model = dict(config, model={"backend": "faster_rcnn", "config": str(other_model_config)})
+    changed_split = dict(config, data={"split": "test"})
+
+    assert fingerprint != experiment_fingerprint(changed_model, checkpoint, dataset)
+    assert fingerprint != experiment_fingerprint(changed_split, checkpoint, dataset)
+
+
 class SaveCapableModel:
     def save(self, path: str | Path) -> None:
         Path(path).write_bytes(b"pruned checkpoint")
@@ -324,6 +349,21 @@ def test_complete_curve_records_k_minus_one_candidates_and_translated_physical_i
     assert not (tmp_path / "artifacts" / "resume.pt").exists()
 
 
+def test_runner_uses_faster_rcnn_dataset_root_for_fingerprint(tmp_path):
+    import yaml
+
+    config_path = _screening_config(tmp_path, ["layer_a"])
+    config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    config["model"]["backend"] = "faster_rcnn"
+    config["data"] = {"dataset_root": str(tmp_path), "split": "val"}
+    config_path.write_text(yaml.safe_dump(config), encoding="utf-8")
+    adapters, _loads, _evaluations, _prunes = _screening_adapters()
+
+    rows = run_single_layer_performance_screening(config_path, adapters=adapters)
+
+    assert [row["status"] for row in rows if row.get("stage") == "single_layer"] == ["completed"] * 3
+
+
 def test_planning_resolves_configured_paths_against_a_wrapped_model(tmp_path):
     config_path = _screening_config(tmp_path, ["layer_a"])
 
@@ -410,6 +450,28 @@ def test_structural_failure_skips_the_rest_of_its_layer_and_continues_with_the_n
 
     layer_a = [row for row in rows if row.get("layer") == "layer_a"]
     assert [row["status"] for row in layer_a] == ["completed", "skipped", "skipped"]
+    assert all(row["status"] == "completed" for row in rows if row.get("layer") == "layer_b")
+    assert any(layer == "layer_b" for layer, _physical, _history in prunes)
+
+
+def test_unscorable_candidate_is_labeled_and_next_layer_is_screened(tmp_path):
+    config_path = _screening_config(tmp_path, ["layer_a", "layer_b"])
+    unscorable_error = screening_module.UnscorableLayerError(
+        "Pruning this filter also changes another module's output channels."
+    )
+
+    def reject_coupled_prune(layer, physical_index, _model):
+        if layer == "layer_a" and physical_index == 0:
+            raise unscorable_error
+
+    adapters, _loads, _evaluations, prunes = _screening_adapters(prune=reject_coupled_prune)
+    rows = run_single_layer_performance_screening(config_path, adapters=adapters)
+
+    layer_a = [row for row in rows if row.get("layer") == "layer_a"]
+    assert layer_a[1]["status"] == "skipped"
+    assert layer_a[1]["reason"] == "unscorable"
+    assert "output channels" in layer_a[1]["error"]
+    assert all(row["status"] == "skipped" for row in layer_a[1:])
     assert all(row["status"] == "completed" for row in rows if row.get("layer") == "layer_b")
     assert any(layer == "layer_b" for layer, _physical, _history in prunes)
 
@@ -754,3 +816,27 @@ def test_production_adapters_fail_fast_when_cuda_is_unavailable_before_baseline_
         ScreeningAdapters.defaults(_production_config())
 
     assert baseline_evaluations == 0
+
+
+def test_faster_rcnn_backend_dispatches_lazily_to_its_adapter_factory(monkeypatch):
+    expected = ScreeningAdapters(
+        load_model=lambda _path: None,
+        evaluate=lambda _model, _settings: {},
+        prune_filter=lambda model, _layer, _index, _settings: model,
+        profile=lambda _model, _settings: {},
+        stats=lambda _model: {},
+        save_checkpoint=lambda _model, _path: None,
+    )
+    calls = []
+    module_name = "infrared_detection.evaluation.faster_rcnn_single_layer_screening"
+    monkeypatch.setitem(
+        sys.modules,
+        module_name,
+        types.SimpleNamespace(make_adapters=lambda config: calls.append(config) or expected),
+    )
+    config = {"model": {"backend": "faster_rcnn"}}
+
+    actual = ScreeningAdapters.defaults(config)
+
+    assert actual is expected
+    assert calls == [config]

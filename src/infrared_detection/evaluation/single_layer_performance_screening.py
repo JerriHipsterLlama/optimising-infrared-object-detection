@@ -76,11 +76,24 @@ class ResumeState:
     last_candidate_id: str | None
 
 
+class UnscorableLayerError(RuntimeError):
+    """A one-filter measurement would also alter another layer's output width."""
+
+
 @dataclass(frozen=True)
 class ScreeningAdapters:
     @classmethod
     def defaults(cls, config: dict) -> "ScreeningAdapters":
-        """Build the real YOLO/CUDA adapters without importing optional services at module import time."""
+        """Build model-specific adapters without importing optional services at module import time."""
+        backend = str(config.get("model", {}).get("backend", "yolo")).lower()
+        if backend in {"faster_rcnn", "faster-rcnn"}:
+            module = importlib.import_module(
+                "infrared_detection.evaluation.faster_rcnn_single_layer_screening"
+            )
+            return module.make_adapters(config)
+        if backend != "yolo":
+            raise ValueError(f"Unsupported single-layer screening backend: {backend!r}.")
+
         import torch
 
         configured_device = str(config.get("runtime", {}).get("device", "0")).lower()
@@ -201,13 +214,26 @@ def experiment_fingerprint(
     experiment = config["experiment"]
     runtime = config["runtime"]
     screening = config["screening"]
+    model_settings = config.get("model", {})
+    data_settings = config.get("data", {})
+    model_config_metadata = None
+    if model_settings.get("config"):
+        model_config = Path(model_settings["config"])
+        model_config_metadata = {
+            "path": str(model_config.resolve()),
+            "size": model_config.stat().st_size,
+            "mtime_ns": model_config.stat().st_mtime_ns,
+        }
     payload = {
         "checkpoint": {"path": str(checkpoint.resolve()), "size": checkpoint.stat().st_size, "mtime_ns": checkpoint.stat().st_mtime_ns},
         "dataset": {"path": str(dataset.resolve()), "size": dataset.stat().st_size, "mtime_ns": dataset.stat().st_mtime_ns},
         "model_variant": experiment["model_variant"],
+        "backend": str(model_settings.get("backend", "yolo")).lower(),
+        "model_config": model_config_metadata,
         "hardware": experiment["hardware_label"],
         "image_size": experiment["image_size"],
         "precision": runtime["precision"],
+        "split": data_settings.get("split", "val"),
         "layer_patterns": screening["layer_patterns"],
         "ranking_version": "minimum-weight-mean-square-v1",
     }
@@ -448,11 +474,17 @@ def _measurement_row(plan: LayerPlan, entry: FilterRanking, rank: int, model_var
     row["status"] = status
     if error is not None:
         row["error"] = str(error)
-        row["reason"] = "structural" if _is_structural_error(error) else "measurement"
+        row["reason"] = (
+            "unscorable" if isinstance(error, UnscorableLayerError)
+            else "structural" if _is_structural_error(error)
+            else "measurement"
+        )
     return row
 
 
 def _is_structural_error(error: BaseException) -> bool:
+    if isinstance(error, UnscorableLayerError):
+        return True
     message = str(error).lower()
     return bool(re.search(r"dependency[- ]graph.*\breject", message)) or bool(
         re.search(r"channel(?:s)?\s+(?:mismatch|mis-match)", message)
@@ -473,7 +505,10 @@ def run_single_layer_performance_screening(
     path, config = _load_config(config_path)
     output_dir = _output_dir(path, config)
     checkpoint = Path(config["model"]["checkpoint"])
-    dataset = Path(config["data"]["dataset_yaml"])
+    dataset_value = config["data"].get("dataset_yaml") or config["data"].get("dataset_root")
+    if not dataset_value:
+        raise ValueError("Screening data must define either dataset_yaml or dataset_root.")
+    dataset = Path(dataset_value)
     fingerprint = experiment_fingerprint(config, checkpoint, dataset)
     experiment = config["experiment"]
     model_variant = str(experiment["model_variant"])
