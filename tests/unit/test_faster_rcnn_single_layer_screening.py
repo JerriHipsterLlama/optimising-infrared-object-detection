@@ -71,6 +71,21 @@ def test_load_model_applies_ema_shadow_parameters_and_checkpoint_round_trips(tmp
     assert reloaded.model.conv.weight.detach().eq(3).all()
 
 
+def test_pending_checkpoint_round_trips_pruned_model_topology(tmp_path, monkeypatch):
+    config, checkpoint_path = _write_config(tmp_path)
+    monkeypatch.setattr(backend, "build_faster_rcnn_model", lambda _count, _yaml: TinyDetector())
+    torch.save({"model_state_dict": TinyDetector().state_dict()}, checkpoint_path)
+    adapters = backend.make_adapters(config)
+    pruned = adapters.load_model(checkpoint_path)
+    pruned.model.conv = nn.Conv2d(3, 1, 1)
+    pending_path = tmp_path / "resume.pending.pt"
+
+    adapters.save_checkpoint(pruned, pending_path)
+    restored = adapters.load_model(pending_path)
+
+    assert restored.model.conv.out_channels == 1
+
+
 def test_evaluate_uses_cameldataset_and_returns_shared_detection_metrics(tmp_path, monkeypatch):
     config, checkpoint_path = _write_config(tmp_path)
     monkeypatch.setattr(backend, "build_faster_rcnn_model", lambda _count, _yaml: TinyDetector())

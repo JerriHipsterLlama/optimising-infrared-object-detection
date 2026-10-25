@@ -91,18 +91,22 @@ def make_adapters(config: Mapping[str, Any]):
     _precision(config)
 
     def load_model(checkpoint_path: str | Path) -> FasterRCNNWrapper:
-        model = build_faster_rcnn_model(number_of_classes, model_payload).to(device)
         payload = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
-        state = payload.get("model_state_dict", payload) if isinstance(payload, dict) else payload
-        if not isinstance(state, Mapping):
-            raise ValueError(f"Faster R-CNN checkpoint has no state dictionary: {checkpoint_path}")
-        model.load_state_dict(state)
-        shadow = payload.get("ema_state_dict", {}).get("shadow", {}) if isinstance(payload, dict) else {}
-        parameters = dict(model.named_parameters())
-        with torch.no_grad():
-            for name, value in shadow.items():
-                if name in parameters and torch.is_tensor(value) and parameters[name].shape == value.shape:
-                    parameters[name].copy_(value.to(device=parameters[name].device, dtype=parameters[name].dtype))
+        saved_model = payload.get("screening_model") if isinstance(payload, dict) else None
+        if isinstance(saved_model, nn.Module):
+            model = saved_model.to(device)
+        else:
+            model = build_faster_rcnn_model(number_of_classes, model_payload).to(device)
+            state = payload.get("model_state_dict", payload) if isinstance(payload, dict) else payload
+            if not isinstance(state, Mapping):
+                raise ValueError(f"Faster R-CNN checkpoint has no state dictionary: {checkpoint_path}")
+            model.load_state_dict(state)
+            shadow = payload.get("ema_state_dict", {}).get("shadow", {}) if isinstance(payload, dict) else {}
+            parameters = dict(model.named_parameters())
+            with torch.no_grad():
+                for name, value in shadow.items():
+                    if name in parameters and torch.is_tensor(value) and parameters[name].shape == value.shape:
+                        parameters[name].copy_(value.to(device=parameters[name].device, dtype=parameters[name].dtype))
         model.eval()
         return FasterRCNNWrapper(model, device, model_payload)
 
@@ -238,7 +242,7 @@ def make_adapters(config: Mapping[str, Any]):
 
     def save_checkpoint(wrapper: FasterRCNNWrapper, path: str | Path) -> None:
         Path(path).parent.mkdir(parents=True, exist_ok=True)
-        torch.save({"model_state_dict": wrapper.model.state_dict()}, path)
+        torch.save({"screening_model": wrapper.model}, path)
 
     return ScreeningAdapters(
         load_model=load_model,
