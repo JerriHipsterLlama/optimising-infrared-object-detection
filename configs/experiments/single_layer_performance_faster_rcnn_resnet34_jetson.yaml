@@ -1,0 +1,41 @@
+model:
+  backend: faster_rcnn
+  checkpoint: artifacts/checkpoints/faster_rcnn_resnet34/resnet34-baseline/weights/best.pt
+  config: configs/models/faster_rcnn_resnet34.yaml
+data:
+  dataset_root: data/camel
+  split: val
+experiment:
+  model_variant: faster-rcnn-resnet34
+  hardware_label: jetson-orin-nano
+  image_size: 336
+  num_classes: 5
+  batch_size: 1
+  output_dir: runs/experiments/single_layer_performance_screening/faster_rcnn_resnet34/jetson-orin-nano
+runtime:
+  device: "0"
+  precision: fp32
+  conf: 0.25
+  iou: 0.5
+  workers: 0
+screening:
+  warmup: 20
+  iterations: 100
+  # COMPLETE ResNet34 candidates from faster_rcnn_resnet34_accuracy_sensitivity.
+  layer_patterns:
+    - backbone.body.layer2.3.conv1
+    - backbone.body.layer3.5.conv1
+    - backbone.body.layer3.0.conv1
+    - backbone.body.layer2.0.conv1
+    - backbone.body.layer3.4.conv1
+    - backbone.body.layer2.2.conv1
+    - backbone.body.layer2.1.conv1
+    - backbone.body.layer3.3.conv1
+    - backbone.body.layer3.1.conv1
+    - backbone.body.layer4.2.conv1
+    - backbone.body.layer4.0.conv1
+    - backbone.body.layer1.1.conv1
+    - backbone.body.layer3.2.conv1
+    - backbone.body.layer4.1.conv1
+    - backbone.body.layer1.0.conv1
+    - backbone.body.layer1.2.conv1
