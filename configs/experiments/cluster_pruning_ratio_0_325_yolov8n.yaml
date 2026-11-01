@@ -1,0 +1,32 @@
+model:
+  checkpoint: models/checkpoints/yolov8/train3/weights/best.pt
+  architecture: yolov8n
+
+pruning:
+  candidate_layers:
+    - model.4.m.1.cv1.conv
+    - model.5.conv
+    - model.6.m.0.cv1.conv
+    - model.6.m.1.cv1.conv
+    - model.7.conv
+    - model.8.cv2.conv
+    - model.8.m.0.cv1.conv
+    - model.9.cv2.conv
+    - model.12.m.0.cv1.conv
+    - model.15.m.0.cv1.conv
+    - model.16.conv
+    - model.18.cv2.conv
+    - model.18.m.0.cv1.conv
+    - model.19.conv
+    - model.21.cv2.conv
+    - model.21.m.0.cv1.conv
+  cluster_size: 8
+  prune_ratios: [0.325]
+  # Required by the config schema; ratio sweeps are not accuracy-gated.
+  allowed_map50_95_drop: 1.0
+  importance: minimum_weight
+
+experiment:
+  output_dir: runs/experiments/cluster_pruning_ratio_0_325_yolov8n_train3
+  image_size: 352
+  seed: 7

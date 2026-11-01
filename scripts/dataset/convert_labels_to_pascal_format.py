@@ -194,7 +194,7 @@ def convert_sequence_labels_to_pascal(labels_dir: str, split: str = "train"):
     # Create empty label files for images without annotations
     # Faster R-CNN handles empty files as background class (no objects)
     all_images = []
-    for ext in ['*.png', '*.jpg', '*.jpeg', '*.npy']:
+    for ext in ['.png', '.jpg', '.jpeg', '.npy']:
         all_images.extend(sorted(images_path.glob(f"Seq*{ext}")))
     all_images = sorted(set(all_images))
     

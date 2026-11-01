@@ -1,0 +1,53 @@
+model:
+  variant: yolov8n
+  cluster_size: 8
+
+baseline:
+  checkpoint: models/checkpoints/yolov8/train3/weights/best.pt
+  onnx: runs/experiments/optimal_pruning_ratio_yolov8n_train3/onnx/baseline-fp32/model.onnx
+
+candidates:
+  - ratio: 0.2
+    checkpoint: runs/experiments/cluster_pruning_ratio_0_2_yolov8n_train3/cluster-8-ratio-0.2/pruned.pt
+  - ratio: 0.225
+    checkpoint: runs/experiments/cluster_pruning_ratio_0_225_yolov8n_train3/cluster-8-ratio-0.225/pruned.pt
+  - ratio: 0.25
+    checkpoint: runs/experiments/cluster_pruning_ratio_0_25_yolov8n_train3/cluster-8-ratio-0.25/pruned.pt
+  - ratio: 0.275
+    checkpoint: runs/experiments/cluster_pruning_ratio_0_275_yolov8n_train3/cluster-8-ratio-0.275/pruned.pt
+  - ratio: 0.3
+    checkpoint: runs/experiments/cluster_pruning_ratio_0_3_yolov8n_train3/cluster-8-ratio-0.3/pruned.pt
+  - ratio: 0.325
+    checkpoint: runs/experiments/cluster_pruning_ratio_0_325_yolov8n_train3/cluster-8-ratio-0.325/pruned.pt
+  - ratio: 0.35
+    checkpoint: runs/experiments/cluster_pruning_ratio_0_35_yolov8n_train3/cluster-8-ratio-0.35/pruned.pt
+  - ratio: 0.375
+    checkpoint: runs/experiments/cluster_pruning_ratio_0_375_yolov8n_train3/cluster-8-ratio-0.375/pruned.pt
+  - ratio: 0.4
+    checkpoint: runs/experiments/cluster_pruning_ratio_0_4_yolov8n_train3/cluster-8-ratio-0.4/pruned.pt
+  - ratio: 0.425
+    checkpoint: runs/experiments/cluster_pruning_ratio_0_425_yolov8n_train3/cluster-8-ratio-0.425/pruned.pt
+  - ratio: 0.45
+    checkpoint: runs/experiments/cluster_pruning_ratio_0_45_yolov8n_train3/cluster-8-ratio-0.45/pruned.pt
+  - ratio: 0.475
+    checkpoint: runs/experiments/cluster_pruning_ratio_0_475_yolov8n_train3/cluster-8-ratio-0.475/pruned.pt
+  - ratio: 0.5
+    checkpoint: runs/experiments/cluster_pruning_ratio_0_5_yolov8n_train3/cluster-8-ratio-0.5/pruned.pt
+
+evaluation:
+  dataset_yaml: data/camel/camel.yaml
+  split: val
+  image_size: 352
+  device: "0"
+  confidence: 0.25
+  iou: 0.6
+  warmup_runs: 20
+  measured_runs: 100
+  providers:
+    - CUDAExecutionProvider
+    - CPUExecutionProvider
+
+hardware_label: rtx3070
+
+experiment:
+  output_dir: runs/experiments/optimal_pruning_ratio_yolov8n
